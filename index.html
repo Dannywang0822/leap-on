@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0b1220" />
+  <title>跃·不停 Leap On</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="hud">
+      <div class="hud-block">
+        <span class="label">分数</span>
+        <span id="score">0</span>
+      </div>
+      <div class="title">跃·不停</div>
+      <div class="hud-block right">
+        <span class="label">最高</span>
+        <span id="best">0</span>
+      </div>
+    </header>
+
+    <canvas id="game" width="390" height="700" aria-label="Leap On game canvas"></canvas>
+
+    <div id="overlay" class="overlay">
+      <div class="panel">
+        <h1 id="overlay-title">跃·不停</h1>
+        <p id="overlay-sub" class="sub">Leap On</p>
+        <p id="overlay-msg" class="msg">点按跳跃，落稳平台。<br/>越跳越难，一失足就重来。</p>
+        <p id="overlay-score" class="final-score hidden"></p>
+        <button id="btn-start" type="button">开始</button>
+      </div>
+    </div>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>
