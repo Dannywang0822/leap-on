@@ -29,6 +29,71 @@
   const overlayScore = document.getElementById("overlay-score");
   const btnStart = document.getElementById("btn-start");
 
+  const BEST_KEY_RANDOM = "leap-on-best-random";
+  const FLOORS_PER_LEVEL = 10;
+  /** Rules ordered easy -> hard; pool unlocks gradually. */
+  const RULES = [
+    { id: "stars", name: "摘星", desc: "平台上方有星星，碰到 +2 分", color: "#ffd84a" },
+    { id: "lowg", name: "低重力", desc: "跳得更高、落得更慢，看准时机", color: "#b48cff" },
+    { id: "ice", name: "冰面", desc: "落地会打滑，滑出边缘就掉下去", color: "#9fe8ff" },
+    { id: "move", name: "疾行平台", desc: "所有平台快速左右移动", color: "#7ec8ff" },
+    { id: "narrow", name: "窄台", desc: "平台变窄，站稳再跳", color: "#ff7eb6" },
+    { id: "wind", name: "侧风", desc: "空中被风吹偏，平台已按风向错位", color: "#8cf0b4" },
+    { id: "crumble", name: "碎裂", desc: "落地 1 秒后平台碎掉，快跳！", color: "#ff9a5c" },
+    { id: "timer", name: "限时", desc: "12 秒内爬完本关 10 层", color: "#ff5a5a" },
+    { id: "blink", name: "闪烁", desc: "平台忽隐忽现，只在亮起时能站", color: "#f0f0a0" },
+  ];
+  const WARMUP = { id: "warmup", name: "热身", desc: "普通平台，熟悉一下节奏", color: "#a8c0f0" };
+  let mode = "random"; // "random" | "classic"
+  let levelRules = []; // index = level
+  let banner = null; // {rule, level, t}
+  let stars = [];
+  let levelTimer = 0;
+  let floorCounter = 0;
+  let bestRandom = 0;
+  try { bestRandom = Number(localStorage.getItem(BEST_KEY_RANDOM) || 0) || 0; } catch (_) {}
+
+  function levelOf(floor) { return floor <= 0 ? 0 : Math.floor((floor - 1) / FLOORS_PER_LEVEL); }
+  function ruleFor(level) {
+    if (mode !== "random") return null;
+    while (levelRules.length <= level) {
+      const L = levelRules.length;
+      if (L === 0) { levelRules.push(WARMUP); continue; }
+      const poolSize = Math.min(RULES.length, 2 + L); // L1:3 rules ... L7+: all
+      const prev = levelRules[L - 1];
+      const pool = RULES.slice(0, poolSize).filter((r) => r !== prev);
+      // bias toward newest unlocked rule the level it unlocks
+      let pick = pool[Math.floor(Math.random() * pool.length)];
+      const fresh = RULES[poolSize - 1];
+      if (L >= 2 && fresh !== prev && poolSize === 2 + L && Math.random() < 0.5) pick = fresh;
+      levelRules.push(pick);
+    }
+    return levelRules[level];
+  }
+  function ruleId(level) { const r = ruleFor(level); return r ? r.id : null; }
+  /** Rule governing the jump physics now = rule of the next floor above. */
+  function activeRuleId() {
+    const fl = standingPlatform ? standingPlatform.floor : player.lastFloor || 0;
+    return ruleId(levelOf(fl + 1));
+  }
+  const WIND_SPEED = 70;
+  let windDirs = {};
+  function windFor(level) {
+    if (ruleId(level) !== "wind") return 0;
+    if (windDirs[level] == null) windDirs[level] = Math.random() < 0.5 ? -1 : 1;
+    return WIND_SPEED * windDirs[level];
+  }
+  function physFor(rid) {
+    if (rid === "lowg") return { g: GRAVITY * 0.62, vy: JUMP_VY * 0.85 };
+    return { g: GRAVITY, vy: JUMP_VY };
+  }
+  /** Airtime from jump to landing on a pad `gap` px higher. */
+  function airTime(gap, ph) {
+    const v = -ph.vy;
+    const disc = v * v - 2 * ph.g * gap;
+    return (v + Math.sqrt(Math.max(0, disc))) / ph.g;
+  }
+
   let best = 0;
   try {
     best = Number(localStorage.getItem(BEST_KEY) || 0) || 0;
@@ -193,6 +258,7 @@
   }
 
   function spawnNext(prev, scoreHint) {
+    if (mode === "random") return spawnNextRandom(prev);
     const gap = gapForScore(scoreHint);
     const w = platformWidthForScore(scoreHint);
     const safe = maxSafeHorizOffset(prev.w, w);
@@ -210,6 +276,70 @@
     return makePlatform(x, prev.y - gap, w, scoreHint);
   }
 
+  function spawnNextRandom(prev) {
+    const floor = (prev.floor || 0) + 1;
+    const level = levelOf(floor);
+    const rid = ruleId(level);
+    // base difficulty grows slowly with level; rules supply the twist
+    const d = Math.min(14, 2 + level * 2);
+    let gap = gapForScore(d);
+    let w = platformWidthForScore(d);
+    if (rid === "lowg") gap *= 1.12;
+    if (rid === "narrow") w = Math.max(44, w * 0.62);
+    if (rid === "ice") w = Math.max(w, 96) * 1.15;
+    if (rid === "wind" || rid === "blink") w = Math.max(w, 84);
+    const safe = maxSafeHorizOffset(prev.w, w);
+    const budget = offsetBudget(d, safe);
+    let drift = 0;
+    if (rid === "wind") drift = windFor(level) * airTime(gap, physFor(rid));
+    const half = w / 2;
+    const lo = half + 12, hi = W - half - 12;
+    let x = prev.x + drift + (Math.random() * 2 - 1) * budget;
+    x = Math.max(lo, Math.min(hi, x));
+    // fairness: target must stay within safe of (prev.x + drift)
+    const center = prev.x + drift;
+    if (Math.abs(x - center) > safe) {
+      x = center + Math.sign(x - center) * safe;
+      x = Math.max(lo, Math.min(hi, x));
+    }
+    let speed = 0, amp = 0;
+    if (rid === "move") {
+      speed = 90 + Math.min(70, level * 6) + Math.random() * 40;
+      amp = 40 + Math.random() * 35;
+    } else if (level >= 3 && rid !== "blink" && rid !== "crumble" && rid !== "ice" && Math.random() < 0.25) {
+      speed = 50 + Math.random() * 30;
+      amp = 25 + Math.random() * 15;
+    }
+    // Jumps are vertical and the player can't pick a standing spot, so every
+    // pad sways enough to pass over any spot reachable on the previous pad.
+    // (If prev also sways, the two drift into line on their own, so only
+    // cover prev's centre then.)
+    const reach = prev.w / 2 - PLAYER_W / 2 + (prev.amp || 0) * 0.5;
+    const need = Math.abs(x - center) + reach - w / 2 + 12;
+    if (speed === 0) speed = 38 + Math.random() * 22;
+    amp = Math.min(80, Math.max(amp, need, 16));
+    // randomised sway rate so two pads never phase-lock out of reach
+    const rate = (rid === "crumble" || rid === "timer" ? 3.2 : 2.0) * (0.75 + Math.random() * 0.6);
+    speed = Math.min(240, Math.max(speed, amp * rate));
+    const p = makePlatform(x, prev.y - gap, w, 0);
+    if (speed > 0) {
+      const minB = half + amp + 8, maxB = W - half - amp - 8;
+      if (minB > maxB) amp = Math.max(0, (W - w - 16) / 2);
+      p.baseX = Math.max(Math.min(minB, maxB), Math.min(Math.max(minB, maxB), x));
+      if (minB > maxB) p.baseX = W / 2;
+      p.x = p.baseX; p.vx = speed * (Math.random() < 0.5 ? -1 : 1); p.amp = amp;
+    }
+    p.floor = floor;
+    p.rule = rid;
+    p.brittle = rid === "crumble";
+    if (rid === "ice") p.ice = true;
+    if (rid === "blink") { p.blink = true; p.blinkT = Math.random() * 1.8; }
+    if (rid === "stars" && Math.random() < 0.75) {
+      stars.push({ x: p.x, y: p.y - 70, plat: p, got: false, t: Math.random() * 6 });
+    }
+    return p;
+  }
+
   function ensurePlatforms() {
     if (!platforms.length) return;
     let topMost = platforms.reduce((m, p) => (p.y < m.y ? p : m), platforms[0]);
@@ -223,6 +353,7 @@
     platforms = platforms.filter(
       (p) => !p.gone && p.y < cameraY + H + 200 && p.y < climbY + 280
     );
+    stars = stars.filter((st) => !st.got && st.y < cameraY + H + 200);
   }
 
   function resetGame() {
@@ -236,6 +367,13 @@
     running = true;
     cameraY = 0;
     climbY = Infinity;
+    levelRules = [];
+    windDirs = {};
+    stars = [];
+    banner = null;
+    levelTimer = 0;
+    player.lastFloor = 0;
+    player.slide = 0;
     player.scaleY = 1;
     player.landPulse = 0;
     player.vx = 0;
@@ -245,6 +383,7 @@
 
     const groundY = H - 100;
     const ground = makePlatform(W / 2, groundY, 160, 0);
+    ground.floor = 0;
     ground.brittle = false;
     ground.vx = 0;
     ground.amp = 0;
@@ -262,10 +401,19 @@
     }
 
     overlay.classList.add("hidden");
+    bestEl.textContent = String(mode === "random" ? bestRandom : best);
+    if (mode === "random") showBanner(0);
     lastTs = performance.now();
   }
 
-  function triggerGameOver() {
+  function showBanner(level) {
+    const r = ruleFor(level);
+    banner = { rule: r, level, t: 0 };
+    if (r && r.id === "timer") levelTimer = 12;
+    if (level > 0) beep(660, 0.09, "triangle", 0.05), setTimeout(() => beep(880, 0.12, "triangle", 0.05), 90);
+  }
+
+  function triggerGameOver(reason) {
     if (gameOver) return;
     gameOver = true;
     running = false;
@@ -273,29 +421,42 @@
     standingPlatform = null;
     beep(110, 0.22, "sawtooth", 0.06);
 
-    if (score > best) {
-      best = score;
+    let isRecord = false;
+    if (mode === "random") {
+      if (score > bestRandom) {
+        bestRandom = score; isRecord = true;
+        try { localStorage.setItem(BEST_KEY_RANDOM, String(bestRandom)); } catch (_) {}
+      }
+      bestEl.textContent = String(bestRandom);
+    } else if (score > best) {
+      best = score; isRecord = true;
       try {
         localStorage.setItem(BEST_KEY, String(best));
       } catch (_) {}
       bestEl.textContent = String(best);
     }
+    const shownBest = mode === "random" ? bestRandom : best;
 
     overlayTitle.textContent = "结束了";
     overlaySub.textContent = "GAME OVER";
+    const lvlTxt = mode === "random" ? "到达第 " + (levelOf(player.lastFloor + 1) + 1) + " 关 · " : "";
     overlayMsg.innerHTML =
-      score > 0 && score >= best ? "新纪录！再来一把？" : "掉下去了。再来一把？";
+      (reason === "timeout" ? "时间到！" : "") +
+      (score > 0 && isRecord ? "新纪录！再来一把？" : reason === "timeout" ? "再来一把？" : "掉下去了。再来一把？");
     overlayScore.classList.remove("hidden");
-    overlayScore.textContent = "本局 " + score + " · 最高 " + best;
+    overlayScore.textContent = lvlTxt + "本局 " + score + " · 最高 " + shownBest;
     btnStart.textContent = "再来一把";
+    setModeButtons(true);
     overlay.classList.remove("hidden");
   }
 
   function jump() {
     if (!running || gameOver || !player.onGround) return;
     player.onGround = false;
-    player.vy = JUMP_VY;
-    player.vx = 0; // fixed arc — no horizontal aim
+    const rid = activeRuleId();
+    player.vy = physFor(rid).vy;
+    player.vx = 0; // fixed arc — no horizontal aim (wind may push in random mode)
+    player.slide = 0;
     standingPlatform = null;
     player.platOffset = 0;
     player.scaleY = 1.15;
@@ -319,7 +480,17 @@
     standingPlatform = plat;
     player.platOffset = player.x - plat.x;
     climbY = plat.y;
+    const prevLevel = levelOf(player.lastFloor + 1);
+    player.lastFloor = plat.floor || 0;
     score += 1;
+    if (plat.ice) player.slide = (Math.random() < 0.5 ? -1 : 1) * (85 + Math.random() * 40);
+    if (mode === "random") {
+      const nl = levelOf(player.lastFloor + 1);
+      if (nl !== prevLevel) {
+        score += 3; // level clear bonus
+        showBanner(nl);
+      }
+    }
     scoreEl.textContent = String(score);
     player.landPulse = 1;
     player.scaleY = 0.72;
@@ -337,7 +508,7 @@
     }
 
     if (plat.brittle && plat.vanishAt == null) {
-      plat.vanishAt = performance.now() + 600;
+      plat.vanishAt = performance.now() + (plat.rule === "crumble" ? 1100 : 600);
     }
     ensurePlatforms();
   }
@@ -348,6 +519,15 @@
       if (p.amp > 0 && p.vx !== 0) {
         p.phase += (Math.abs(p.vx) / Math.max(p.amp, 1)) * dt;
         p.x = p.baseX + Math.sin(p.phase) * p.amp;
+      }
+      if (p.blink) {
+        p.blinkT = (p.blinkT + dt) % 1.8;
+        p.solid = p.blinkT < 1.15;
+        if (!p.solid && standingPlatform && standingPlatform.id === p.id) {
+          player.onGround = false;
+          standingPlatform = null;
+          player.platOffset = 0;
+        }
       }
       if (p.vanishAt != null && now >= p.vanishAt) {
         p.gone = true;
@@ -378,6 +558,20 @@
     player.scaleY += (1 - player.scaleY) * Math.min(1, dt * 12);
 
     if (player.onGround && standingPlatform) {
+      if (player.slide) {
+        player.platOffset += player.slide * dt;
+        player.slide *= Math.exp(-2.2 * dt);
+        if (Math.abs(player.slide) < 4) player.slide = 0;
+        if (Math.abs(player.platOffset) > standingPlatform.w / 2 + 2) {
+          // slid off the edge
+          player.onGround = false;
+          standingPlatform = null;
+          player.vx = player.slide * 0.5;
+          player.slide = 0;
+        }
+      }
+    }
+    if (player.onGround && standingPlatform) {
       player.x = standingPlatform.x + player.platOffset;
       const left = standingPlatform.x - standingPlatform.w / 2 + player.w / 2;
       const right = standingPlatform.x + standingPlatform.w / 2 - player.w / 2;
@@ -387,15 +581,19 @@
       player.vy = 0;
       player.vx = 0;
     } else {
-      player.vy += GRAVITY * dt;
-      // vx stays 0 — no air steer
+      const rid = activeRuleId();
+      player.vy += physFor(rid).g * dt;
+      // no player steering; wind (random mode) is the only push
+      const wind = rid === "wind" ? windFor(levelOf((player.lastFloor || 0) + 1)) : 0;
+      player.x += (player.vx + wind) * dt;
+      player.x = Math.max(player.w / 2, Math.min(W - player.w / 2, player.x));
       player.y += player.vy * dt;
 
       if (player.vy > 0) {
         const footY = player.y + player.h / 2;
         const prevFoot = footY - player.vy * dt;
         for (const p of platforms) {
-          if (p.gone) continue;
+          if (p.gone || (p.blink && !p.solid)) continue;
           const top = p.y;
           const left = p.x - p.w / 2;
           const right = p.x + p.w / 2;
@@ -418,6 +616,24 @@
 
     if (player.y - cameraY > H + 40) {
       triggerGameOver();
+    }
+    if (mode === "random") {
+      for (const st of stars) {
+        st.t += dt;
+        if (!st.got && Math.abs(st.x - player.x) < 26 && Math.abs(st.y - player.y) < 30) {
+          st.got = true;
+          score += 2;
+          scoreEl.textContent = String(score);
+          beep(1040, 0.07, "sine", 0.05);
+          for (let i = 0; i < 10; i++) particles.push({ x: st.x, y: st.y, vx: (Math.random() - 0.5) * 220, vy: (Math.random() - 0.5) * 220, life: 0.4, color: "#ffd84a" });
+        }
+      }
+      if (banner) banner.t += dt;
+      const r = ruleFor(levelOf((player.lastFloor || 0) + 1));
+      if (r && r.id === "timer" && banner && banner.rule === r) {
+        levelTimer -= dt;
+        if (levelTimer <= 0) triggerGameOver("timeout");
+      }
     }
   }
 
@@ -466,6 +682,25 @@
     const x = s.x - p.w / 2;
     const y = s.y;
     if (y < -40 || y > H + 40) return;
+    if (p.blink) {
+      const warn = p.solid && p.blinkT > 0.85;
+      ctx.globalAlpha = p.solid ? (warn ? 0.45 + 0.4 * Math.abs(Math.sin(p.blinkT * 30)) : 1) : 0.14;
+      ctx.fillStyle = "#b8b860";
+      roundRect(ctx, x, y, p.w, p.h, 6); ctx.fill();
+      ctx.fillStyle = "#f0f0a0";
+      roundRect(ctx, x, y, p.w, 5, 4); ctx.fill();
+      ctx.globalAlpha = 1;
+      return;
+    }
+    if (p.ice) {
+      ctx.fillStyle = "#5fa8c8";
+      roundRect(ctx, x, y, p.w, p.h, 6); ctx.fill();
+      ctx.fillStyle = "#dff8ff";
+      roundRect(ctx, x, y, p.w, 5, 4); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.6)";
+      ctx.fillRect(x + p.w * 0.2, y + 1, 10, 2); ctx.fillRect(x + p.w * 0.65, y + 1, 6, 2);
+      return;
+    }
 
     if (p.brittle) {
       ctx.fillStyle = "#c45a2a";
@@ -555,6 +790,76 @@
     }
   }
 
+  function drawStars() {
+    for (const st of stars) {
+      if (st.got) continue;
+      const s = worldToScreen(st.x, st.y + Math.sin(st.t * 4) * 4);
+      if (s.y < -20 || s.y > H + 20) continue;
+      ctx.fillStyle = "#ffd84a";
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const r = i % 2 ? 5 : 12, a = -Math.PI / 2 + (i * Math.PI) / 5;
+        ctx.lineTo(s.x + Math.cos(a) * r, s.y + Math.sin(a) * r);
+      }
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  function drawWind() {
+    const lvl = levelOf((player.lastFloor || 0) + 1);
+    if (ruleId(lvl) !== "wind") return;
+    const dir = Math.sign(windFor(lvl));
+    ctx.strokeStyle = "rgba(140,240,180,0.25)";
+    ctx.lineWidth = 2;
+    const t = performance.now() / 1000;
+    for (let i = 0; i < 9; i++) {
+      const yy = (i * 83 + 20) % H;
+      let xx = ((i * 131 + t * 220 * dir) % (W + 80) + W + 80) % (W + 80) - 40;
+      ctx.beginPath(); ctx.moveTo(xx, yy); ctx.lineTo(xx + 28 * dir, yy); ctx.stroke();
+    }
+  }
+
+  function drawRuleHud() {
+    if (mode !== "random" || !running) return;
+    const lvl = levelOf((player.lastFloor || 0) + 1);
+    const r = ruleFor(lvl);
+    ctx.textAlign = "left";
+    ctx.font = "bold 13px system-ui,sans-serif";
+    ctx.fillStyle = r.color;
+    const floorIn = ((player.lastFloor || 0) % FLOORS_PER_LEVEL);
+    ctx.fillText("第" + (lvl + 1) + "关 · " + r.name + "  " + floorIn + "/" + FLOORS_PER_LEVEL, 10, 20);
+    if (r.id === "timer") {
+      ctx.textAlign = "right";
+      ctx.font = "bold 18px system-ui,sans-serif";
+      ctx.fillStyle = levelTimer < 4 ? "#ff5a5a" : "#ffd0d0";
+      ctx.fillText(Math.max(0, levelTimer).toFixed(1) + "s", W - 10, 22);
+    }
+    if (banner && banner.t < 2.2) {
+      const t = banner.t;
+      const a = t < 0.2 ? t / 0.2 : t > 1.8 ? Math.max(0, (2.2 - t) / 0.4) : 1;
+      const sc = t < 0.2 ? 0.8 + t : 1;
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.translate(W / 2, H * 0.3);
+      ctx.scale(sc, sc);
+      ctx.fillStyle = "rgba(8,14,28,0.82)";
+      roundRect(ctx, -165, -46, 330, 92, 14); ctx.fill();
+      ctx.strokeStyle = r.color; ctx.lineWidth = 2;
+      roundRect(ctx, -165, -46, 330, 92, 14); ctx.stroke();
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#8aa0c8";
+      ctx.font = "12px system-ui,sans-serif";
+      ctx.fillText("第 " + (banner.level + 1) + " 关", 0, -24);
+      ctx.fillStyle = r.color;
+      ctx.font = "bold 28px system-ui,sans-serif";
+      ctx.fillText(r.name, 0, 8);
+      ctx.fillStyle = "#e8eefc";
+      ctx.font = "14px system-ui,sans-serif";
+      ctx.fillText(r.desc, 0, 32);
+      ctx.restore();
+    }
+  }
+
   function drawHint() {
     if (!running || score > 0 || !player.onGround) return;
     ctx.fillStyle = "rgba(168,192,240,0.55)";
@@ -580,10 +885,13 @@
     ctx.clearRect(-ox / scale, -oy / scale, cw / scale, ch / scale);
 
     drawBackground();
+    drawWind();
     for (const p of platforms) drawPlatform(p);
+    drawStars();
     drawParticles();
     drawPlayer();
     drawHint();
+    drawRuleHud();
   }
 
   function frame(ts) {
@@ -644,16 +952,31 @@
     { passive: false }
   );
 
+  const btnClassic = document.getElementById("btn-classic");
+  function setModeButtons(show) {
+    if (!btnClassic) return;
+    btnClassic.classList.toggle("hidden", !show);
+    btnClassic.textContent = mode === "random" ? "换经典模式" : "换随机玩法";
+  }
+  function startMode(m) {
+    mode = m;
+    resetGame();
+  }
+  if (btnClassic) {
+    btnClassic.addEventListener("click", function (e) { e.stopPropagation(); startMode(mode === "random" ? "classic" : "random"); });
+    btnClassic.addEventListener("touchend", function (e) { e.preventDefault(); e.stopPropagation(); startMode(mode === "random" ? "classic" : "random"); }, { passive: false });
+  }
+
   btnStart.addEventListener("click", function (e) {
     e.stopPropagation();
-    resetGame();
+    startMode(mode);
   });
   btnStart.addEventListener(
     "touchend",
     function (e) {
       e.preventDefault();
       e.stopPropagation();
-      resetGame();
+      startMode(mode);
     },
     { passive: false }
   );
@@ -661,15 +984,17 @@
   overlayTitle.textContent = "跃·不停";
   overlaySub.textContent = "Leap On";
   overlayMsg.innerHTML =
-    "点按跳跃，落稳平台。<br/>越跳越难，一失足就重来。";
+    "点按跳跃，落稳平台。<br/>随机玩法：每 10 层一关，每关规则随机。";
   overlayScore.classList.add("hidden");
-  btnStart.textContent = "开始";
+  btnStart.textContent = "随机玩法";
   overlay.classList.remove("hidden");
 
   function showIdleScene() {
     score = 0;
     platforms = [];
+    stars = [];
     const ground = makePlatform(W / 2, H - 100, 160, 0);
+    ground.floor = 0;
     ground.brittle = false;
     ground.vx = 0;
     ground.amp = 0;
@@ -694,8 +1019,19 @@
     jump,
     resetGame,
     triggerGameOver,
+    startMode,
+    RULES,
+    getRules: () => levelRules.map((r) => r.id),
     getState: function () {
       return {
+        mode,
+        bestRandom,
+        level: levelOf((player.lastFloor || 0) + 1),
+        rule: activeRuleId(),
+        wind: windFor(levelOf((player.lastFloor || 0) + 1)),
+        standing: standingPlatform,
+        platforms,
+        playerX: player.x,
         score,
         best,
         running,

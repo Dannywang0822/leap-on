@@ -173,3 +173,22 @@ body {
   transform: translateY(4px);
   box-shadow: 0 4px 0 #2a6fa8, 0 6px 12px rgba(74, 163, 232, 0.3);
 }
+
+#btn-classic {
+  appearance: none;
+  margin-top: 16px;
+  width: 100%;
+  min-height: 48px;
+  border-radius: 14px;
+  border: 2px solid #4aa3e8;
+  background: transparent;
+  color: #a8d4ff;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+#btn-classic:active { background: rgba(74,163,232,0.15); }
+#btn-classic.hidden { display: none; }
