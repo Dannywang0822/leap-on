@@ -167,10 +167,10 @@
     guagua: {
       id: "guagua",
       name: "小瓜瓜",
-      jumpSrc: "assets/guagua_jump.png?v=5",
-      landSrc: "assets/guagua_land.png?v=5",
-      rocketSrc: "assets/guagua_rocket_ride.png?v=5",
-      springSrc: "assets/guagua_spring_burst.png?v=5",
+      jumpSrc: "assets/guagua_jump.png?v=6",
+      landSrc: "assets/guagua_land.png?v=6",
+      rocketSrc: "assets/guagua_rocket_ride.png?v=6",
+      springSrc: "assets/guagua_spring_burst.png?v=6",
       rocketPivotX: 479,
       rocketPivotY: 708,
       springPivotX: 511,
@@ -179,10 +179,10 @@
     zhizhi: {
       id: "zhizhi",
       name: "小之之",
-      jumpSrc: "assets/zhizhi_jump.png?v=5",
-      landSrc: "assets/zhizhi_land.png?v=5",
-      rocketSrc: "assets/zhizhi_rocket_ride.png?v=5",
-      springSrc: "assets/zhizhi_spring_burst.png?v=5",
+      jumpSrc: "assets/zhizhi_jump.png?v=6",
+      landSrc: "assets/zhizhi_land.png?v=6",
+      rocketSrc: "assets/zhizhi_rocket_ride.png?v=6",
+      springSrc: "assets/zhizhi_spring_burst.png?v=6",
       rocketPivotX: 562,
       rocketPivotY: 682,
       springPivotX: 514,
@@ -208,12 +208,14 @@
   function activeChar() {
     return CHARS[characterId];
   }
-  const ITEM_DRAW = 24;
+  const ITEM_DRAW = 24 * 1.8;
+  const ITEM_LIFT = 28 * 1.8;
+  const ITEM_BURST = 0.34;
   const itemImages = {};
   function itemImage(kind) {
     if (!itemImages[kind]) {
       const img = new Image();
-      img.src = "assets/items/item_" + kind + ".png?v=5";
+      img.src = "assets/items/item_" + kind + ".png?v=6";
       itemImages[kind] = img;
     }
     return itemImages[kind];
@@ -253,6 +255,7 @@
   let punchT = 0;
   let rocketRide = null;
   let pickupBanner = null;
+  let itemBursts = [];
   let lastSafe = null;
   let needRevive = false;
   let itemFloors = new Set();
@@ -449,6 +452,7 @@
     fallGrace = 0;
     rocketRide = null;
     pickupBanner = null;
+    itemBursts = [];
     lastSafe = null;
     needRevive = false;
     itemFloors = new Set();
@@ -458,7 +462,7 @@
   }
 
   function itemHudImg(kind, dim) {
-    return '<img src="assets/items/item_' + kind + '.png?v=5" width="16" height="16" alt=""' + (dim ? ' class="dim"' : "") + ">";
+    return '<img src="assets/items/item_' + kind + '.png?v=6" width="20" height="20" alt=""' + (dim ? ' class="dim"' : "") + ">";
   }
 
   function syncItemHud() {
@@ -713,8 +717,9 @@
     if (u >= 1) finishRocket();
   }
 
-  function showPickup(kind) {
+  function showPickup(kind, x, y) {
     pickupBanner = { kind: kind, t: 0 };
+    itemBursts.push({ kind: kind, x: x, y: y, t: 0, dur: ITEM_BURST });
     const freq = kind === "life" ? 680 : kind === "rocket" ? 760 : 520;
     beep(freq, 0.09, "triangle", 0.055);
     for (let i = 0; i < 8; i++) {
@@ -744,7 +749,7 @@
         return;
       }
     }
-    showPickup(kind);
+    showPickup(kind, plat.x, plat.y - ITEM_LIFT);
     syncItemHud();
   }
 
@@ -1083,6 +1088,10 @@
     if (punchT > 0) {
       punchT += dt;
       if (punchT > 0.24) punchT = 0;
+    }
+    if (itemBursts.length) {
+      for (const b of itemBursts) b.t += dt;
+      itemBursts = itemBursts.filter((b) => b.t < b.dur);
     }
   }
 
@@ -1485,12 +1494,45 @@
 
   function drawItem(p) {
     if (!p.item || p.item.got || p.gone || p.ghost) return;
-    const s = worldToScreen(p.x, p.y - 28);
+    const s = worldToScreen(p.x, p.y - ITEM_LIFT);
     if (s.y < -30 || s.y > H + 30) return;
     ctx.save();
     if (p.blink && p.solid === false) ctx.globalAlpha = 0.22;
     drawItemIcon(p.item.kind, s.x, s.y, ITEM_DRAW);
     ctx.restore();
+  }
+
+  function drawItemBursts() {
+    for (const b of itemBursts) {
+      const u = b.t / b.dur;
+      if (u < 0 || u >= 1) continue;
+      const s = worldToScreen(b.x, b.y);
+      let scale = 1;
+      let alpha = 1;
+      if (u < 0.38) {
+        const k = u / 0.38;
+        const e = 1 - (1 - k) * (1 - k) * (1 - k);
+        scale = 0.45 + (1.75 - 0.45) * e;
+      } else {
+        const k = (u - 0.38) / 0.62;
+        scale = 1.75 - 0.55 * k;
+        alpha = 1 - k;
+        for (let i = 0; i < 6; i++) {
+          const ang = (i / 6) * Math.PI * 2 + 0.5;
+          const dist = 8 + k * 32;
+          ctx.save();
+          ctx.globalAlpha = (1 - k) * 0.8;
+          drawItemIcon(b.kind, s.x + Math.cos(ang) * dist, s.y + Math.sin(ang) * dist * 0.7, ITEM_DRAW * (0.4 - 0.18 * k));
+          ctx.restore();
+        }
+      }
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(s.x, s.y);
+      ctx.scale(scale, scale);
+      drawItemIcon(b.kind, 0, 0, ITEM_DRAW);
+      ctx.restore();
+    }
   }
 
   function drawPickupBanner() {
@@ -1619,6 +1661,7 @@
     drawStars();
     drawParticles();
     drawPlayer();
+    drawItemBursts();
     drawHint();
     drawPickupBanner();
     drawRuleHud();
@@ -1810,6 +1853,7 @@
         springJumps: springJumps,
         fallGrace: fallGrace,
         rocket: !!rocketRide,
+        pickupBurst: itemBursts.length ? { n: itemBursts.length, t: itemBursts[0].t, dur: itemBursts[0].dur, kind: itemBursts[0].kind } : null,
         artReady: frameReady(CHARS.guagua.land) && frameReady(CHARS.guagua.jump) && frameReady(CHARS.guagua.rocket) && frameReady(CHARS.guagua.spring) && frameReady(CHARS.zhizhi.land) && frameReady(CHARS.zhizhi.jump) && frameReady(CHARS.zhizhi.rocket) && frameReady(CHARS.zhizhi.spring) && frameReady(itemImage("life")) && frameReady(itemImage("rocket")) && frameReady(itemImage("spring")),
         lastFloor: player.lastFloor || 0,
         items: platforms.filter(function (p) { return p.item && !p.item.got; }).map(function (p) {
