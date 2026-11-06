@@ -159,13 +159,10 @@
     springJump: false,
   };
 
-  // Official frames are 512×512. Pivot (256, 481) sits on the hit-box bottom center.
-  // Land and jump use the same scale — no extra scale between those two frames.
-  // The 28×36 hit box stays the collision size.
-  const CHAR_SIZE = 512;
-  const CHAR_PIVOT_X = 256;
-  const CHAR_PIVOT_Y = 481;
-  const CHAR_SCALE = 0.2;
+  // One pixel density for every sprite: outfit height ~36px.
+  // 512 canvases draw at ~41px, 1024 canvases at ~82px. Same scale, no per-pose tweak.
+  // Pivot is the sole center, placed on the bottom-center of the 28×36 hit box.
+  const SPRITE_SCALE = 36 / 451;
   const CHAR_KEY = "leap-on-character";
   const CHARS = {
     guagua: {
@@ -173,12 +170,24 @@
       name: "小瓜瓜",
       jumpSrc: "assets/guagua_jump.png?v=4",
       landSrc: "assets/guagua_land.png?v=4",
+      rocketSrc: "assets/guagua_rocket_ride.png?v=4",
+      springSrc: "assets/guagua_spring_burst.png?v=4",
+      rocketPivotX: 479,
+      rocketPivotY: 708,
+      springPivotX: 511,
+      springPivotY: 684,
     },
     zhizhi: {
       id: "zhizhi",
       name: "小之之",
       jumpSrc: "assets/zhizhi_jump.png?v=4",
       landSrc: "assets/zhizhi_land.png?v=4",
+      rocketSrc: "assets/zhizhi_rocket_ride.png?v=4",
+      springSrc: "assets/zhizhi_spring_burst.png?v=4",
+      rocketPivotX: 562,
+      rocketPivotY: 682,
+      springPivotX: 514,
+      springPivotY: 676,
     },
   };
   let characterId = "guagua";
@@ -194,11 +203,13 @@
   for (const id in CHARS) {
     CHARS[id].jump = loadFrame(CHARS[id].jumpSrc);
     CHARS[id].land = loadFrame(CHARS[id].landSrc);
+    CHARS[id].rocket = loadFrame(CHARS[id].rocketSrc);
+    CHARS[id].spring = loadFrame(CHARS[id].springSrc);
   }
   function activeChar() {
     return CHARS[characterId];
   }
-  const ITEM_DRAW = 28;
+  const ITEM_DRAW = 24;
   const itemImages = {};
   function itemImage(kind) {
     if (!itemImages[kind]) {
@@ -240,10 +251,7 @@
   let extraLives = 0;
   let springJumps = 0;
   let fallGrace = 0;
-  /** Spring-burst clock. 0 means the character is at the shared frame scale. */
-  let springFx = 0;
   let punchT = 0;
-  let shockwaves = [];
   let rocketRide = null;
   let pickupBanner = null;
   let lastSafe = null;
@@ -447,9 +455,7 @@
     itemFloors = new Set();
     lastItemFloor = { life: -9999, rocket: -9999, spring: -9999 };
     player.springJump = false;
-    springFx = 0;
     punchT = 0;
-    shockwaves = [];
   }
 
   function itemHudImg(kind, dim) {
@@ -953,9 +959,7 @@
       springJumps -= 1;
       player.springJump = true;
       player.vy = ph.vy * SPRING_MUL;
-      springFx = 0.0001;
       punchT = 0.0001;
-      shockwaves.push({ x: player.x, y: player.y + player.h / 2, t: 0 });
     } else {
       player.springJump = false;
       player.vy = ph.vy;
@@ -1077,16 +1081,10 @@
   }
 
   function updateJuice(dt) {
-    if (springFx > 0) {
-      springFx += dt;
-      if (springFx > 0.42) springFx = 0;
-    }
     if (punchT > 0) {
       punchT += dt;
       if (punchT > 0.24) punchT = 0;
     }
-    for (const w of shockwaves) w.t += dt;
-    if (shockwaves.length) shockwaves = shockwaves.filter((w) => w.t < 0.4);
   }
 
   function updatePlayer(dt) {
@@ -1345,12 +1343,10 @@
     return !!(img && img.complete && img.naturalWidth > 0);
   }
 
-  /** Both frames share CHAR_SCALE. sx/sy are only the spring-burst squash. */
-  function drawCharacterFrame(which, footX, footY, sx, sy) {
-    const img = activeChar()[which];
+  /** Draw a sprite so its pivot sits on the hit-box sole. Scale is shared. */
+  function drawAnchored(img, pivotX, pivotY, srcSize, footX, footY) {
     if (!frameReady(img)) {
       const hw = player.w / 2;
-      const hh = player.h / 2;
       ctx.fillStyle = "#e8f0ff";
       roundRect(ctx, footX - hw, footY - player.h, player.w, player.h, 8);
       ctx.fill();
@@ -1362,19 +1358,9 @@
     ctx.save();
     ctx.imageSmoothingEnabled = true;
     ctx.translate(footX, footY);
-    ctx.scale(CHAR_SCALE * sx, CHAR_SCALE * sy);
-    ctx.drawImage(img, -CHAR_PIVOT_X, -CHAR_PIVOT_Y, CHAR_SIZE, CHAR_SIZE);
+    ctx.scale(SPRITE_SCALE, SPRITE_SCALE);
+    ctx.drawImage(img, -pivotX, -pivotY, srcSize, srcSize);
     ctx.restore();
-  }
-
-  function springStretch() {
-    if (springFx <= 0) return { sx: 1, sy: 1 };
-    const t = springFx;
-    let sy = 1;
-    if (t < 0.08) sy = 1 - 0.3 * (t / 0.08);
-    else if (t < 0.2) sy = 0.7 + 0.52 * ((t - 0.08) / 0.12);
-    else sy = 1.22 - 0.22 * Math.min(1, (t - 0.2) / 0.2);
-    return { sx: 1 / Math.pow(sy, 0.55), sy: sy };
   }
 
   function punchOffset() {
@@ -1383,151 +1369,31 @@
     return Math.sin(u * Math.PI) * -8;
   }
 
-  function drawRocketRide(cx, footY) {
-    const t = performance.now() / 1000;
-    ctx.save();
-    ctx.translate(cx, footY);
-    ctx.strokeStyle = "rgba(255,255,255,0.38)";
-    ctx.lineWidth = 2;
-    ctx.lineCap = "round";
-    for (let i = 0; i < 6; i++) {
-      const side = i < 3 ? -1 : 1;
-      const yy = ((t * 260 + i * 34) % 100) - 78;
-      const xx = side * (34 + (i % 3) * 9);
-      ctx.beginPath();
-      ctx.moveTo(xx, yy);
-      ctx.lineTo(xx, yy + 18);
-      ctx.stroke();
-    }
-    // Sit the rocket beside the body so the cream hull, fins, and flame
-    // stay visible while the outfit is drawn in front.
-    ctx.translate(22, 4);
-    const flick = 0.72 + 0.28 * Math.abs(Math.sin(t * 42));
-    ctx.fillStyle = "#ffd24a";
-    ctx.beginPath();
-    ctx.moveTo(-7, 8);
-    ctx.lineTo(0, 18 + 28 * flick);
-    ctx.lineTo(7, 8);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = "#ff7a1a";
-    ctx.beginPath();
-    ctx.moveTo(-13, 6);
-    ctx.lineTo(0, 14 + 20 * flick);
-    ctx.lineTo(13, 6);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = "#fff4c4";
-    ctx.beginPath();
-    ctx.moveTo(-4, 8);
-    ctx.lineTo(0, 16 + 12 * flick);
-    ctx.lineTo(4, 8);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = "#f6f1e6";
-    ctx.strokeStyle = "#6b3f22";
-    ctx.lineWidth = 2.4;
-    ctx.lineJoin = "round";
-    ctx.beginPath();
-    ctx.moveTo(0, -102);
-    ctx.lineTo(15, -70);
-    ctx.lineTo(15, -8);
-    ctx.quadraticCurveTo(15, 8, 0, 8);
-    ctx.quadraticCurveTo(-15, 8, -15, -8);
-    ctx.lineTo(-15, -70);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = "#f27a1a";
-    ctx.beginPath();
-    ctx.moveTo(-14, -28);
-    ctx.lineTo(-32, 10);
-    ctx.lineTo(-6, 2);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(14, -28);
-    ctx.lineTo(32, 10);
-    ctx.lineTo(6, 2);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = "#3aa0e8";
-    ctx.beginPath();
-    ctx.arc(0, -58, 7, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  function drawSpringSpeedLines(cx, footY) {
-    const t = performance.now() / 1000;
-    ctx.save();
-    ctx.translate(cx, footY);
-    ctx.strokeStyle = "rgba(214, 255, 106, 0.75)";
-    ctx.lineWidth = 2;
-    ctx.lineCap = "round";
-    for (let i = 0; i < 5; i++) {
-      const side = i < 2 ? -1 : 1;
-      const yy = ((t * 280 + i * 23) % 70) - 20;
-      const xx = side * (26 + (i % 3) * 8);
-      ctx.beginPath();
-      ctx.moveTo(xx, yy);
-      ctx.lineTo(xx, yy + 14);
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  function drawShockwaves() {
-    for (const w of shockwaves) {
-      const u = w.t / 0.36;
-      if (u < 0 || u >= 1) continue;
-      const s = worldToScreen(w.x, w.y);
-      const rad = 6 + u * 42;
-      ctx.save();
-      ctx.translate(s.x, s.y);
-      ctx.globalAlpha = 0.9 * (1 - u);
-      ctx.strokeStyle = "#e8ff7a";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, rad, rad * 0.32, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillStyle = "#c6f25a";
-      for (let i = 0; i < 10; i++) {
-        const a = (i / 10) * Math.PI * 2 + u;
-        const inner = rad * 0.45;
-        const outer = rad + 12 * (1 - u);
-        ctx.beginPath();
-        ctx.moveTo(Math.cos(a - 0.12) * inner, Math.sin(a - 0.12) * inner * 0.32);
-        ctx.lineTo(Math.cos(a) * outer, Math.sin(a) * outer * 0.32);
-        ctx.lineTo(Math.cos(a + 0.12) * inner, Math.sin(a + 0.12) * inner * 0.32);
-        ctx.closePath();
-        ctx.fill();
-      }
-      ctx.restore();
-    }
-  }
-
   function drawPlayer() {
     const s = worldToScreen(player.x, player.y);
     const footY = s.y + player.h / 2;
+    const ch = activeChar();
     const riding = !!rocketRide;
-    const airborne = riding || !player.onGround;
+    const springAir = player.springJump && !player.onGround;
 
     if (player.onGround && !riding) {
       ctx.fillStyle = "rgba(0,0,0,0.28)";
       ctx.beginPath();
-      ctx.ellipse(s.x, footY + 3, 16, 4.2, 0, 0, Math.PI * 2);
+      ctx.ellipse(s.x, footY + 2, 10, 3.2, 0, 0, Math.PI * 2);
       ctx.fill();
     }
 
-    if (riding) drawRocketRide(s.x, footY);
-    else if (player.springJump && !player.onGround) drawSpringSpeedLines(s.x, footY);
+    if (riding) {
+      drawAnchored(ch.rocket, ch.rocketPivotX, ch.rocketPivotY, 1024, s.x, footY);
+    } else if (springAir) {
+      drawAnchored(ch.spring, ch.springPivotX, ch.springPivotY, 1024, s.x, footY);
+    } else {
+      drawAnchored(airborneFrame(ch), 256, 481, 512, s.x, footY);
+    }
+  }
 
-    const stretch = !riding && springFx > 0 ? springStretch() : { sx: 1, sy: 1 };
-    drawCharacterFrame(airborne ? "jump" : "land", s.x, footY, stretch.sx, stretch.sy);
+  function airborneFrame(ch) {
+    return (!player.onGround || rocketRide) ? ch.jump : ch.land;
   }
 
   function drawParticles() {
@@ -1622,10 +1488,9 @@
     if (!p.item || p.item.got || p.gone || p.ghost) return;
     const s = worldToScreen(p.x, p.y - 28);
     if (s.y < -30 || s.y > H + 30) return;
-    const bob = Math.sin(performance.now() / 180 + p.id) * 2;
     ctx.save();
     if (p.blink && p.solid === false) ctx.globalAlpha = 0.22;
-    drawItemIcon(p.item.kind, s.x, s.y + bob, ITEM_DRAW);
+    drawItemIcon(p.item.kind, s.x, s.y, ITEM_DRAW);
     ctx.restore();
   }
 
@@ -1754,7 +1619,6 @@
     for (const p of platforms) drawItem(p);
     drawStars();
     drawParticles();
-    drawShockwaves();
     drawPlayer();
     drawHint();
     drawPickupBanner();
@@ -1947,7 +1811,7 @@
         springJumps: springJumps,
         fallGrace: fallGrace,
         rocket: !!rocketRide,
-        artReady: frameReady(activeChar().land) && frameReady(activeChar().jump) && frameReady(itemImage("life")),
+        artReady: frameReady(CHARS.guagua.land) && frameReady(CHARS.guagua.jump) && frameReady(CHARS.guagua.rocket) && frameReady(CHARS.guagua.spring) && frameReady(CHARS.zhizhi.land) && frameReady(CHARS.zhizhi.jump) && frameReady(CHARS.zhizhi.rocket) && frameReady(CHARS.zhizhi.spring) && frameReady(itemImage("life")) && frameReady(itemImage("rocket")) && frameReady(itemImage("spring")),
         lastFloor: player.lastFloor || 0,
         items: platforms.filter(function (p) { return p.item && !p.item.got; }).map(function (p) {
           return { floor: p.floor || 0, kind: p.item.kind, y: p.y };
