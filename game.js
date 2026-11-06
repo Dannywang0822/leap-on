@@ -156,13 +156,48 @@
   };
 
   // 11 frames, frame 0 = land/spread, frame 10 = arms-up jump.
-  // Sheet is 2x logical pixels; feet sit on y = frameH - POSE_FOOT.
+  // Sheets are 2x logical pixels; feet sit on y = frameH - foot.
+  // VISUAL scales the drawing only. The 28×36 hit box stays the same.
   const POSE_N = 11;
-  const POSE_FW = 210;
-  const POSE_FH = 222;
-  const POSE_FOOT = 4;
-  const poseSheet = new Image();
-  poseSheet.src = "assets/player-poses.png?v=2";
+  const VISUAL = 0.8;
+  const CHAR_KEY = "leap-on-character";
+  const CHARS = {
+    guagua: {
+      id: "guagua",
+      name: "小瓜瓜",
+      src: "assets/player-poses.png?v=3",
+      fw: 210,
+      fh: 222,
+      foot: 4,
+    },
+    zhizhi: {
+      id: "zhizhi",
+      name: "小之之",
+      src: "assets/zhizhi-poses.png?v=3",
+      fw: 178,
+      fh: 222,
+      foot: 4,
+    },
+  };
+  let characterId = "guagua";
+  try {
+    const saved = localStorage.getItem(CHAR_KEY);
+    if (saved && CHARS[saved]) characterId = saved;
+  } catch (_) {}
+  const poseSheets = {};
+  function sheetFor(id) {
+    if (!poseSheets[id]) {
+      const img = new Image();
+      img.src = CHARS[id].src;
+      poseSheets[id] = img;
+    }
+    return poseSheets[id];
+  }
+  sheetFor("guagua");
+  sheetFor("zhizhi");
+  function activeChar() {
+    return CHARS[characterId];
+  }
 
   /** @type {Array<{id:number,x:number,y:number,w:number,h:number,vx:number,amp:number,baseX:number,phase:number,brittle:boolean,vanishAt:number|null,gone:boolean}>} */
   let platforms = [];
@@ -787,6 +822,8 @@
       ctx.fill();
     }
 
+    const ch = activeChar();
+    const poseSheet = sheetFor(ch.id);
     const ready = poseSheet.complete && poseSheet.naturalWidth > 0;
     if (!ready) {
       const hw = player.w / 2;
@@ -806,16 +843,16 @@
     const eased = pose * pose * (3 - 2 * pose);
     const frame = Math.round(eased * (POSE_N - 1));
     // Squash/stretch around the feet. Width eases the other way so the volume holds.
-    const sy = 0.5 * player.scaleY;
-    const sx = 0.5 / Math.pow(Math.max(0.55, player.scaleY), 0.35);
+    const sy = 0.5 * VISUAL * player.scaleY;
+    const sx = (0.5 * VISUAL) / Math.pow(Math.max(0.55, player.scaleY), 0.35);
     ctx.save();
     ctx.imageSmoothingEnabled = true;
     ctx.translate(s.x, footY);
     ctx.scale(sx, sy);
     ctx.drawImage(
       poseSheet,
-      frame * POSE_FW, 0, POSE_FW, POSE_FH,
-      -POSE_FW / 2, -(POSE_FH - POSE_FOOT), POSE_FW, POSE_FH
+      frame * ch.fw, 0, ch.fw, ch.fh,
+      -ch.fw / 2, -(ch.fh - ch.foot), ch.fw, ch.fh
     );
     ctx.restore();
   }
@@ -906,7 +943,7 @@
     ctx.font = "14px system-ui,sans-serif";
     ctx.textAlign = "center";
     const s = worldToScreen(player.x, player.y);
-    ctx.fillText("点按跳跃", s.x, s.y - 108);
+    ctx.fillText("点按跳跃", s.x, s.y - 96);
   }
 
   function render() {
@@ -968,6 +1005,8 @@
 
   window.addEventListener("keydown", function (e) {
     if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+      const onCard = e.target && e.target.closest && e.target.closest(".char-card");
+      if (onCard) return;
       e.preventDefault();
       if (overlay && !overlay.classList.contains("hidden")) {
         if (e.code === "Space") btnStart.click();
@@ -1048,7 +1087,29 @@
     climbY = ground.y;
     cameraY = 0;
   }
-  showIdleScene();
+  function selectCharacter(id) {
+    if (!CHARS[id]) return;
+    characterId = id;
+    try { localStorage.setItem(CHAR_KEY, id); } catch (_) {}
+    document.querySelectorAll(".char-card").forEach(function (btn) {
+      const on = btn.dataset.char === id;
+      btn.classList.toggle("selected", on);
+      btn.setAttribute("aria-checked", on ? "true" : "false");
+    });
+    if (!running && !gameOver) showIdleScene();
+  }
+  document.querySelectorAll(".char-card").forEach(function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      selectCharacter(btn.dataset.char);
+    });
+    btn.addEventListener("touchend", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      selectCharacter(btn.dataset.char);
+    }, { passive: false });
+  });
+  selectCharacter(characterId);
   requestAnimationFrame(frame);
 
   window.__LEAP_ON__ = {
@@ -1062,6 +1123,7 @@
     resetGame,
     triggerGameOver,
     startMode,
+    selectCharacter,
     RULES,
     getRules: () => levelRules.map((r) => r.id),
     getState: function () {
@@ -1083,6 +1145,9 @@
         playerY: player.y,
         climbY,
         playerVx: player.vx,
+        character: characterId,
+        pose: player.pose,
+        jumping: player.jumping,
       };
     },
   };
