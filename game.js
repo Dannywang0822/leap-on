@@ -149,7 +149,20 @@
     scaleY: 1,
     landPulse: 0,
     platOffset: 0,
+    /** 0 = land / spread pose, 1 = jump pose. Visual only. */
+    pose: 0,
+    /** True only during a tap-jump, so a slide-off doesn't snap into the tuck. */
+    jumping: false,
   };
+
+  // 11 frames, frame 0 = land/spread, frame 10 = arms-up jump.
+  // Sheet is 2x logical pixels; feet sit on y = frameH - POSE_FOOT.
+  const POSE_N = 11;
+  const POSE_FW = 210;
+  const POSE_FH = 222;
+  const POSE_FOOT = 4;
+  const poseSheet = new Image();
+  poseSheet.src = "assets/player-poses.png?v=2";
 
   /** @type {Array<{id:number,x:number,y:number,w:number,h:number,vx:number,amp:number,baseX:number,phase:number,brittle:boolean,vanishAt:number|null,gone:boolean}>} */
   let platforms = [];
@@ -380,6 +393,8 @@
     player.vy = 0;
     player.onGround = true;
     player.platOffset = 0;
+    player.pose = 0;
+    player.jumping = false;
 
     const groundY = H - 100;
     const ground = makePlatform(W / 2, groundY, 160, 0);
@@ -460,6 +475,7 @@
     standingPlatform = null;
     player.platOffset = 0;
     player.scaleY = 1.15;
+    player.jumping = true;
     beep(520, 0.06, "square", 0.045);
   }
 
@@ -494,6 +510,7 @@
     scoreEl.textContent = String(score);
     player.landPulse = 1;
     player.scaleY = 0.72;
+    player.jumping = false;
     beep(320, 0.05, "triangle", 0.05);
 
     for (let i = 0; i < 8; i++) {
@@ -556,6 +573,11 @@
       player.landPulse = Math.max(0, player.landPulse - dt * 4);
     }
     player.scaleY += (1 - player.scaleY) * Math.min(1, dt * 12);
+    // Pose blend is visual only — collision stays on player.w / player.h.
+    // Tap launches into the arms-up pose; landing eases back into the spread.
+    const poseTarget = !player.onGround && player.jumping ? 1 : 0;
+    const poseRate = poseTarget > player.pose ? 22 : 14;
+    player.pose += (poseTarget - player.pose) * Math.min(1, dt * poseRate);
 
     if (player.onGround && standingPlatform) {
       if (player.slide) {
@@ -755,29 +777,47 @@
 
   function drawPlayer() {
     const s = worldToScreen(player.x, player.y);
-    const hw = player.w / 2;
-    const hh = (player.h / 2) * player.scaleY;
-    const top = s.y - hh;
-    const bot = s.y + hh;
+    const footY = s.y + player.h / 2;
+    const spread = 1 - Math.max(0, Math.min(1, player.pose));
 
     if (player.onGround) {
-      ctx.fillStyle = "rgba(0,0,0,0.25)";
+      ctx.fillStyle = "rgba(0,0,0,0.28)";
       ctx.beginPath();
-      ctx.ellipse(s.x, bot + 4, hw * 0.9, 4, 0, 0, Math.PI * 2);
+      ctx.ellipse(s.x, footY + 3, 12 + spread * 22, 4.2, 0, 0, Math.PI * 2);
       ctx.fill();
     }
 
-    ctx.fillStyle = "#e8f0ff";
-    roundRect(ctx, s.x - hw, top, player.w, hh * 2, 8);
-    ctx.fill();
-    ctx.fillStyle = "#4aa3e8";
-    roundRect(ctx, s.x - hw + 4, top + 6, player.w - 8, 8, 4);
-    ctx.fill();
-    ctx.fillStyle = "#0b1220";
-    ctx.beginPath();
-    ctx.arc(s.x - 5, top + hh * 2 * 0.45, 2.5, 0, Math.PI * 2);
-    ctx.arc(s.x + 5, top + hh * 2 * 0.45, 2.5, 0, Math.PI * 2);
-    ctx.fill();
+    const ready = poseSheet.complete && poseSheet.naturalWidth > 0;
+    if (!ready) {
+      const hw = player.w / 2;
+      const hh = (player.h / 2) * player.scaleY;
+      const top = s.y - hh;
+      ctx.fillStyle = "#e8f0ff";
+      roundRect(ctx, s.x - hw, top, player.w, hh * 2, 8);
+      ctx.fill();
+      ctx.fillStyle = "#4aa3e8";
+      roundRect(ctx, s.x - hw + 4, top + 6, player.w - 8, 8, 4);
+      ctx.fill();
+      return;
+    }
+
+    const pose = Math.max(0, Math.min(1, player.pose));
+    // Smoothstep rushes the imperfect middle frames and settles on the two photos.
+    const eased = pose * pose * (3 - 2 * pose);
+    const frame = Math.round(eased * (POSE_N - 1));
+    // Squash/stretch around the feet. Width eases the other way so the volume holds.
+    const sy = 0.5 * player.scaleY;
+    const sx = 0.5 / Math.pow(Math.max(0.55, player.scaleY), 0.35);
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.translate(s.x, footY);
+    ctx.scale(sx, sy);
+    ctx.drawImage(
+      poseSheet,
+      frame * POSE_FW, 0, POSE_FW, POSE_FH,
+      -POSE_FW / 2, -(POSE_FH - POSE_FOOT), POSE_FW, POSE_FH
+    );
+    ctx.restore();
   }
 
   function drawParticles() {
@@ -866,7 +906,7 @@
     ctx.font = "14px system-ui,sans-serif";
     ctx.textAlign = "center";
     const s = worldToScreen(player.x, player.y);
-    ctx.fillText("点按跳跃", s.x, s.y - 50);
+    ctx.fillText("点按跳跃", s.x, s.y - 108);
   }
 
   function render() {
@@ -1002,6 +1042,8 @@
     player.x = ground.x;
     player.y = ground.y - player.h / 2;
     player.onGround = true;
+    player.pose = 0;
+    player.jumping = false;
     standingPlatform = ground;
     climbY = ground.y;
     cameraY = 0;
