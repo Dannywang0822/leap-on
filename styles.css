@@ -71,11 +71,57 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.hud-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
 .hud .title {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.12em;
   color: #a8c0f0;
+}
+
+.item-hud {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.item-hud.hidden {
+  display: none;
+}
+
+.hud-lives,
+.hud-spring {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.hud-lives svg,
+.hud-spring svg {
+  display: block;
+}
+
+.hud-spring {
+  color: #e7ffb0;
+  font-size: 14px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-spring.off {
+  color: rgba(232, 238, 252, 0.45);
+}
+
+.hud-spring.off svg {
+  opacity: 0.45;
 }
 
 #game {
