@@ -159,19 +159,18 @@
     springJump: false,
   };
 
-  // One pixel density for every sprite: outfit height ~36px.
-  // 512 canvases draw at ~41px, 1024 canvases at ~82px. Same scale, no per-pose tweak.
+  // One pixel density for every pose. 512 canvases draw at ~74px, 1024 at ~147px.
   // Pivot is the sole center, placed on the bottom-center of the 28×36 hit box.
-  const SPRITE_SCALE = 36 / 451;
+  const SPRITE_SCALE = (36 / 451) * 1.8;
   const CHAR_KEY = "leap-on-character";
   const CHARS = {
     guagua: {
       id: "guagua",
       name: "小瓜瓜",
-      jumpSrc: "assets/guagua_jump.png?v=4",
-      landSrc: "assets/guagua_land.png?v=4",
-      rocketSrc: "assets/guagua_rocket_ride.png?v=4",
-      springSrc: "assets/guagua_spring_burst.png?v=4",
+      jumpSrc: "assets/guagua_jump.png?v=5",
+      landSrc: "assets/guagua_land.png?v=5",
+      rocketSrc: "assets/guagua_rocket_ride.png?v=5",
+      springSrc: "assets/guagua_spring_burst.png?v=5",
       rocketPivotX: 479,
       rocketPivotY: 708,
       springPivotX: 511,
@@ -180,10 +179,10 @@
     zhizhi: {
       id: "zhizhi",
       name: "小之之",
-      jumpSrc: "assets/zhizhi_jump.png?v=4",
-      landSrc: "assets/zhizhi_land.png?v=4",
-      rocketSrc: "assets/zhizhi_rocket_ride.png?v=4",
-      springSrc: "assets/zhizhi_spring_burst.png?v=4",
+      jumpSrc: "assets/zhizhi_jump.png?v=5",
+      landSrc: "assets/zhizhi_land.png?v=5",
+      rocketSrc: "assets/zhizhi_rocket_ride.png?v=5",
+      springSrc: "assets/zhizhi_spring_burst.png?v=5",
       rocketPivotX: 562,
       rocketPivotY: 682,
       springPivotX: 514,
@@ -214,7 +213,7 @@
   function itemImage(kind) {
     if (!itemImages[kind]) {
       const img = new Image();
-      img.src = "assets/items/item_" + kind + ".png?v=4";
+      img.src = "assets/items/item_" + kind + ".png?v=5";
       itemImages[kind] = img;
     }
     return itemImages[kind];
@@ -459,7 +458,7 @@
   }
 
   function itemHudImg(kind, dim) {
-    return '<img src="assets/items/item_' + kind + '.png?v=4" width="16" height="16" alt=""' + (dim ? ' class="dim"' : "") + ">";
+    return '<img src="assets/items/item_' + kind + '.png?v=5" width="16" height="16" alt=""' + (dim ? ' class="dim"' : "") + ">";
   }
 
   function syncItemHud() {
