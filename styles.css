@@ -104,9 +104,17 @@ body {
   gap: 3px;
 }
 
-.hud-lives svg,
-.hud-spring svg {
+.hud-lives img,
+.hud-spring img {
+  width: 16px;
+  height: 16px;
   display: block;
+  object-fit: contain;
+}
+
+.hud-lives img.dim,
+.hud-spring.off img {
+  opacity: 0.35;
 }
 
 .hud-spring {

@@ -159,28 +159,26 @@
     springJump: false,
   };
 
-  // 11 frames, frame 0 = land/spread, frame 10 = arms-up jump.
-  // Sheets are 2x logical pixels; feet sit on y = frameH - foot.
-  // VISUAL scales the drawing only. The 28×36 hit box stays the same.
-  const POSE_N = 11;
-  const VISUAL = 0.8;
+  // Official frames are 512×512. Pivot (256, 481) sits on the hit-box bottom center.
+  // Land and jump use the same scale — no extra scale between those two frames.
+  // The 28×36 hit box stays the collision size.
+  const CHAR_SIZE = 512;
+  const CHAR_PIVOT_X = 256;
+  const CHAR_PIVOT_Y = 481;
+  const CHAR_SCALE = 0.2;
   const CHAR_KEY = "leap-on-character";
   const CHARS = {
     guagua: {
       id: "guagua",
       name: "小瓜瓜",
-      src: "assets/player-poses.png?v=4",
-      fw: 210,
-      fh: 222,
-      foot: 4,
+      jumpSrc: "assets/guagua_jump.png?v=4",
+      landSrc: "assets/guagua_land.png?v=4",
     },
     zhizhi: {
       id: "zhizhi",
       name: "小之之",
-      src: "assets/zhizhi-poses.png?v=4",
-      fw: 178,
-      fh: 222,
-      foot: 4,
+      jumpSrc: "assets/zhizhi_jump.png?v=4",
+      landSrc: "assets/zhizhi_land.png?v=4",
     },
   };
   let characterId = "guagua";
@@ -188,20 +186,31 @@
     const saved = localStorage.getItem(CHAR_KEY);
     if (saved && CHARS[saved]) characterId = saved;
   } catch (_) {}
-  const poseSheets = {};
-  function sheetFor(id) {
-    if (!poseSheets[id]) {
-      const img = new Image();
-      img.src = CHARS[id].src;
-      poseSheets[id] = img;
-    }
-    return poseSheets[id];
+  function loadFrame(src) {
+    const img = new Image();
+    img.src = src;
+    return img;
   }
-  sheetFor("guagua");
-  sheetFor("zhizhi");
+  for (const id in CHARS) {
+    CHARS[id].jump = loadFrame(CHARS[id].jumpSrc);
+    CHARS[id].land = loadFrame(CHARS[id].landSrc);
+  }
   function activeChar() {
     return CHARS[characterId];
   }
+  const ITEM_DRAW = 28;
+  const itemImages = {};
+  function itemImage(kind) {
+    if (!itemImages[kind]) {
+      const img = new Image();
+      img.src = "assets/items/item_" + kind + ".png?v=4";
+      itemImages[kind] = img;
+    }
+    return itemImages[kind];
+  }
+  itemImage("life");
+  itemImage("rocket");
+  itemImage("spring");
 
   /** @type {Array<{id:number,x:number,y:number,w:number,h:number,vx:number,amp:number,baseX:number,phase:number,brittle:boolean,vanishAt:number|null,gone:boolean}>} */
   let platforms = [];
@@ -231,6 +240,10 @@
   let extraLives = 0;
   let springJumps = 0;
   let fallGrace = 0;
+  /** Spring-burst clock. 0 means the character is at the shared frame scale. */
+  let springFx = 0;
+  let punchT = 0;
+  let shockwaves = [];
   let rocketRide = null;
   let pickupBanner = null;
   let lastSafe = null;
@@ -434,16 +447,13 @@
     itemFloors = new Set();
     lastItemFloor = { life: -9999, rocket: -9999, spring: -9999 };
     player.springJump = false;
+    springFx = 0;
+    punchT = 0;
+    shockwaves = [];
   }
 
-  function heartSvg(on) {
-    const fill = on ? "#ff4d6d" : "none";
-    const stroke = on ? "#ffd0da" : "rgba(255,180,196,0.85)";
-    return '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 20C7 16.6 4 13.4 4 10a4.2 4.2 0 0 1 7.2-2.9L12 8.2l.8-1.1A4.2 4.2 0 0 1 20 10c0 3.4-3 6.6-8 10z" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1.7" stroke-linejoin="round"/></svg>';
-  }
-
-  function springSvg() {
-    return '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><ellipse cx="12" cy="4.2" rx="6" ry="2.1" fill="none" stroke="#d6ff6a" stroke-width="1.7"/><ellipse cx="12" cy="9.1" rx="6" ry="2.1" fill="none" stroke="#d6ff6a" stroke-width="1.7"/><ellipse cx="12" cy="14" rx="6" ry="2.1" fill="none" stroke="#d6ff6a" stroke-width="1.7"/><ellipse cx="12" cy="18.9" rx="6" ry="2.1" fill="none" stroke="#d6ff6a" stroke-width="1.7"/></svg>';
+  function itemHudImg(kind, dim) {
+    return '<img src="assets/items/item_' + kind + '.png?v=4" width="16" height="16" alt=""' + (dim ? ' class="dim"' : "") + ">";
   }
 
   function syncItemHud() {
@@ -451,9 +461,9 @@
     const show = running && !gameOver;
     itemHud.classList.toggle("hidden", !show);
     if (!show || !hudLives || !hudSpring) return;
-    hudLives.innerHTML = heartSvg(extraLives >= 1) + heartSvg(extraLives >= 2);
+    hudLives.innerHTML = itemHudImg("life", extraLives < 1) + itemHudImg("life", extraLives < 2);
     hudLives.setAttribute("aria-label", "生命 " + extraLives);
-    hudSpring.innerHTML = springSvg() + "<b>" + springJumps + "</b>";
+    hudSpring.innerHTML = itemHudImg("spring", springJumps <= 0) + "<b>" + springJumps + "</b>";
     hudSpring.classList.toggle("off", springJumps <= 0);
     hudSpring.setAttribute("aria-label", "弹力 " + springJumps);
   }
@@ -943,6 +953,9 @@
       springJumps -= 1;
       player.springJump = true;
       player.vy = ph.vy * SPRING_MUL;
+      springFx = 0.0001;
+      punchT = 0.0001;
+      shockwaves.push({ x: player.x, y: player.y + player.h / 2, t: 0 });
     } else {
       player.springJump = false;
       player.vy = ph.vy;
@@ -1063,7 +1076,21 @@
     platforms = platforms.filter((p) => !p.gone);
   }
 
+  function updateJuice(dt) {
+    if (springFx > 0) {
+      springFx += dt;
+      if (springFx > 0.42) springFx = 0;
+    }
+    if (punchT > 0) {
+      punchT += dt;
+      if (punchT > 0.24) punchT = 0;
+    }
+    for (const w of shockwaves) w.t += dt;
+    if (shockwaves.length) shockwaves = shockwaves.filter((w) => w.t < 0.4);
+  }
+
   function updatePlayer(dt) {
+    updateJuice(dt);
     if (pickupBanner) {
       pickupBanner.t += dt;
       if (pickupBanner.t >= PICKUP_BANNER) pickupBanner = null;
@@ -1314,51 +1341,193 @@
     }
   }
 
-  function drawPlayer() {
-    const s = worldToScreen(player.x, player.y);
-    const footY = s.y + player.h / 2;
-    const spread = 1 - Math.max(0, Math.min(1, player.pose));
+  function frameReady(img) {
+    return !!(img && img.complete && img.naturalWidth > 0);
+  }
 
-    if (player.onGround) {
-      ctx.fillStyle = "rgba(0,0,0,0.28)";
-      ctx.beginPath();
-      ctx.ellipse(s.x, footY + 3, 12 + spread * 22, 4.2, 0, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    const ch = activeChar();
-    const poseSheet = sheetFor(ch.id);
-    const ready = poseSheet.complete && poseSheet.naturalWidth > 0;
-    if (!ready) {
+  /** Both frames share CHAR_SCALE. sx/sy are only the spring-burst squash. */
+  function drawCharacterFrame(which, footX, footY, sx, sy) {
+    const img = activeChar()[which];
+    if (!frameReady(img)) {
       const hw = player.w / 2;
-      const hh = (player.h / 2) * player.scaleY;
-      const top = s.y - hh;
+      const hh = player.h / 2;
       ctx.fillStyle = "#e8f0ff";
-      roundRect(ctx, s.x - hw, top, player.w, hh * 2, 8);
+      roundRect(ctx, footX - hw, footY - player.h, player.w, player.h, 8);
       ctx.fill();
       ctx.fillStyle = "#4aa3e8";
-      roundRect(ctx, s.x - hw + 4, top + 6, player.w - 8, 8, 4);
+      roundRect(ctx, footX - hw + 4, footY - player.h + 6, player.w - 8, 8, 4);
       ctx.fill();
       return;
     }
-
-    const pose = Math.max(0, Math.min(1, player.pose));
-    // Smoothstep rushes the imperfect middle frames and settles on the two photos.
-    const eased = pose * pose * (3 - 2 * pose);
-    const frame = Math.round(eased * (POSE_N - 1));
-    // Squash/stretch around the feet. Width eases the other way so the volume holds.
-    const sy = 0.5 * VISUAL * player.scaleY;
-    const sx = (0.5 * VISUAL) / Math.pow(Math.max(0.55, player.scaleY), 0.35);
     ctx.save();
     ctx.imageSmoothingEnabled = true;
-    ctx.translate(s.x, footY);
-    ctx.scale(sx, sy);
-    ctx.drawImage(
-      poseSheet,
-      frame * ch.fw, 0, ch.fw, ch.fh,
-      -ch.fw / 2, -(ch.fh - ch.foot), ch.fw, ch.fh
-    );
+    ctx.translate(footX, footY);
+    ctx.scale(CHAR_SCALE * sx, CHAR_SCALE * sy);
+    ctx.drawImage(img, -CHAR_PIVOT_X, -CHAR_PIVOT_Y, CHAR_SIZE, CHAR_SIZE);
     ctx.restore();
+  }
+
+  function springStretch() {
+    if (springFx <= 0) return { sx: 1, sy: 1 };
+    const t = springFx;
+    let sy = 1;
+    if (t < 0.08) sy = 1 - 0.3 * (t / 0.08);
+    else if (t < 0.2) sy = 0.7 + 0.52 * ((t - 0.08) / 0.12);
+    else sy = 1.22 - 0.22 * Math.min(1, (t - 0.2) / 0.2);
+    return { sx: 1 / Math.pow(sy, 0.55), sy: sy };
+  }
+
+  function punchOffset() {
+    if (punchT <= 0) return 0;
+    const u = Math.min(1, punchT / 0.24);
+    return Math.sin(u * Math.PI) * -8;
+  }
+
+  function drawRocketRide(cx, footY) {
+    const t = performance.now() / 1000;
+    ctx.save();
+    ctx.translate(cx, footY);
+    ctx.strokeStyle = "rgba(255,255,255,0.38)";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    for (let i = 0; i < 6; i++) {
+      const side = i < 3 ? -1 : 1;
+      const yy = ((t * 260 + i * 34) % 100) - 78;
+      const xx = side * (34 + (i % 3) * 9);
+      ctx.beginPath();
+      ctx.moveTo(xx, yy);
+      ctx.lineTo(xx, yy + 18);
+      ctx.stroke();
+    }
+    // Sit the rocket beside the body so the cream hull, fins, and flame
+    // stay visible while the outfit is drawn in front.
+    ctx.translate(22, 4);
+    const flick = 0.72 + 0.28 * Math.abs(Math.sin(t * 42));
+    ctx.fillStyle = "#ffd24a";
+    ctx.beginPath();
+    ctx.moveTo(-7, 8);
+    ctx.lineTo(0, 18 + 28 * flick);
+    ctx.lineTo(7, 8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#ff7a1a";
+    ctx.beginPath();
+    ctx.moveTo(-13, 6);
+    ctx.lineTo(0, 14 + 20 * flick);
+    ctx.lineTo(13, 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#fff4c4";
+    ctx.beginPath();
+    ctx.moveTo(-4, 8);
+    ctx.lineTo(0, 16 + 12 * flick);
+    ctx.lineTo(4, 8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#f6f1e6";
+    ctx.strokeStyle = "#6b3f22";
+    ctx.lineWidth = 2.4;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(0, -102);
+    ctx.lineTo(15, -70);
+    ctx.lineTo(15, -8);
+    ctx.quadraticCurveTo(15, 8, 0, 8);
+    ctx.quadraticCurveTo(-15, 8, -15, -8);
+    ctx.lineTo(-15, -70);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#f27a1a";
+    ctx.beginPath();
+    ctx.moveTo(-14, -28);
+    ctx.lineTo(-32, 10);
+    ctx.lineTo(-6, 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(14, -28);
+    ctx.lineTo(32, 10);
+    ctx.lineTo(6, 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#3aa0e8";
+    ctx.beginPath();
+    ctx.arc(0, -58, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawSpringSpeedLines(cx, footY) {
+    const t = performance.now() / 1000;
+    ctx.save();
+    ctx.translate(cx, footY);
+    ctx.strokeStyle = "rgba(214, 255, 106, 0.75)";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    for (let i = 0; i < 5; i++) {
+      const side = i < 2 ? -1 : 1;
+      const yy = ((t * 280 + i * 23) % 70) - 20;
+      const xx = side * (26 + (i % 3) * 8);
+      ctx.beginPath();
+      ctx.moveTo(xx, yy);
+      ctx.lineTo(xx, yy + 14);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawShockwaves() {
+    for (const w of shockwaves) {
+      const u = w.t / 0.36;
+      if (u < 0 || u >= 1) continue;
+      const s = worldToScreen(w.x, w.y);
+      const rad = 6 + u * 42;
+      ctx.save();
+      ctx.translate(s.x, s.y);
+      ctx.globalAlpha = 0.9 * (1 - u);
+      ctx.strokeStyle = "#e8ff7a";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, rad, rad * 0.32, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = "#c6f25a";
+      for (let i = 0; i < 10; i++) {
+        const a = (i / 10) * Math.PI * 2 + u;
+        const inner = rad * 0.45;
+        const outer = rad + 12 * (1 - u);
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a - 0.12) * inner, Math.sin(a - 0.12) * inner * 0.32);
+        ctx.lineTo(Math.cos(a) * outer, Math.sin(a) * outer * 0.32);
+        ctx.lineTo(Math.cos(a + 0.12) * inner, Math.sin(a + 0.12) * inner * 0.32);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawPlayer() {
+    const s = worldToScreen(player.x, player.y);
+    const footY = s.y + player.h / 2;
+    const riding = !!rocketRide;
+    const airborne = riding || !player.onGround;
+
+    if (player.onGround && !riding) {
+      ctx.fillStyle = "rgba(0,0,0,0.28)";
+      ctx.beginPath();
+      ctx.ellipse(s.x, footY + 3, 16, 4.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (riding) drawRocketRide(s.x, footY);
+    else if (player.springJump && !player.onGround) drawSpringSpeedLines(s.x, footY);
+
+    const stretch = !riding && springFx > 0 ? springStretch() : { sx: 1, sy: 1 };
+    drawCharacterFrame(airborne ? "jump" : "land", s.x, footY, stretch.sx, stretch.sy);
   }
 
   function drawParticles() {
@@ -1437,10 +1606,16 @@
     }
   }
 
-  function drawItemIcon(kind, cx, cy, s) {
-    if (kind === "life") drawHeartIcon(cx, cy, s, true);
-    else if (kind === "rocket") drawRocketIcon(cx, cy, s);
-    else drawSpringIcon(cx, cy, s);
+  function drawItemIcon(kind, cx, cy, size) {
+    const img = itemImage(kind);
+    const d = size || ITEM_DRAW;
+    if (frameReady(img)) {
+      ctx.drawImage(img, cx - d / 2, cy - d / 2, d, d);
+      return;
+    }
+    if (kind === "life") drawHeartIcon(cx, cy, d * 0.42, true);
+    else if (kind === "rocket") drawRocketIcon(cx, cy, d * 0.42);
+    else drawSpringIcon(cx, cy, d * 0.42);
   }
 
   function drawItem(p) {
@@ -1450,7 +1625,7 @@
     const bob = Math.sin(performance.now() / 180 + p.id) * 2;
     ctx.save();
     if (p.blink && p.solid === false) ctx.globalAlpha = 0.22;
-    drawItemIcon(p.item.kind, s.x, s.y + bob, 12);
+    drawItemIcon(p.item.kind, s.x, s.y + bob, ITEM_DRAW);
     ctx.restore();
   }
 
@@ -1570,6 +1745,8 @@
     const oy = (ch - H * scale) / 2;
     ctx.setTransform(scale, 0, 0, scale, ox, oy);
     ctx.clearRect(-ox / scale, -oy / scale, cw / scale, ch / scale);
+    const punch = punchOffset();
+    if (punch) ctx.setTransform(scale, 0, 0, scale, ox, oy + punch * scale);
 
     drawBackground();
     drawWind();
@@ -1577,6 +1754,7 @@
     for (const p of platforms) drawItem(p);
     drawStars();
     drawParticles();
+    drawShockwaves();
     drawPlayer();
     drawHint();
     drawPickupBanner();
@@ -1769,6 +1947,7 @@
         springJumps: springJumps,
         fallGrace: fallGrace,
         rocket: !!rocketRide,
+        artReady: frameReady(activeChar().land) && frameReady(activeChar().jump) && frameReady(itemImage("life")),
         lastFloor: player.lastFloor || 0,
         items: platforms.filter(function (p) { return p.item && !p.item.got; }).map(function (p) {
           return { floor: p.floor || 0, kind: p.item.kind, y: p.y };
