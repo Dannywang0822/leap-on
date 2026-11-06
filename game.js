@@ -48,6 +48,8 @@
   let levelRules = []; // index = level
   let banner = null; // {rule, level, t}
   let stars = [];
+  /** Optional test seed: rule ids applied at the start of a run, before spawn. */
+  let ruleSeed = null;
   let levelTimer = 0;
   let floorCounter = 0;
   let bestRandom = 0;
@@ -153,30 +155,39 @@
     pose: 0,
     /** True only during a tap-jump, so a slide-off doesn't snap into the tuck. */
     jumping: false,
+    /** Airborne from a spring-boosted takeoff. Landing only accepts the next floor. */
+    springJump: false,
   };
 
-  // 11 frames, frame 0 = land/spread, frame 10 = arms-up jump.
-  // Sheets are 2x logical pixels; feet sit on y = frameH - foot.
-  // VISUAL scales the drawing only. The 28×36 hit box stays the same.
-  const POSE_N = 11;
-  const VISUAL = 0.8;
+  // One pixel density for every sprite: outfit height ~36px.
+  // 512 canvases draw at ~41px, 1024 canvases at ~82px. Same scale, no per-pose tweak.
+  // Pivot is the sole center, placed on the bottom-center of the 28×36 hit box.
+  const SPRITE_SCALE = 36 / 451;
   const CHAR_KEY = "leap-on-character";
   const CHARS = {
     guagua: {
       id: "guagua",
       name: "小瓜瓜",
-      src: "assets/player-poses.png?v=3",
-      fw: 210,
-      fh: 222,
-      foot: 4,
+      jumpSrc: "assets/guagua_jump.png?v=4",
+      landSrc: "assets/guagua_land.png?v=4",
+      rocketSrc: "assets/guagua_rocket_ride.png?v=4",
+      springSrc: "assets/guagua_spring_burst.png?v=4",
+      rocketPivotX: 479,
+      rocketPivotY: 708,
+      springPivotX: 511,
+      springPivotY: 684,
     },
     zhizhi: {
       id: "zhizhi",
       name: "小之之",
-      src: "assets/zhizhi-poses.png?v=3",
-      fw: 178,
-      fh: 222,
-      foot: 4,
+      jumpSrc: "assets/zhizhi_jump.png?v=4",
+      landSrc: "assets/zhizhi_land.png?v=4",
+      rocketSrc: "assets/zhizhi_rocket_ride.png?v=4",
+      springSrc: "assets/zhizhi_spring_burst.png?v=4",
+      rocketPivotX: 562,
+      rocketPivotY: 682,
+      springPivotX: 514,
+      springPivotY: 676,
     },
   };
   let characterId = "guagua";
@@ -184,20 +195,33 @@
     const saved = localStorage.getItem(CHAR_KEY);
     if (saved && CHARS[saved]) characterId = saved;
   } catch (_) {}
-  const poseSheets = {};
-  function sheetFor(id) {
-    if (!poseSheets[id]) {
-      const img = new Image();
-      img.src = CHARS[id].src;
-      poseSheets[id] = img;
-    }
-    return poseSheets[id];
+  function loadFrame(src) {
+    const img = new Image();
+    img.src = src;
+    return img;
   }
-  sheetFor("guagua");
-  sheetFor("zhizhi");
+  for (const id in CHARS) {
+    CHARS[id].jump = loadFrame(CHARS[id].jumpSrc);
+    CHARS[id].land = loadFrame(CHARS[id].landSrc);
+    CHARS[id].rocket = loadFrame(CHARS[id].rocketSrc);
+    CHARS[id].spring = loadFrame(CHARS[id].springSrc);
+  }
   function activeChar() {
     return CHARS[characterId];
   }
+  const ITEM_DRAW = 24;
+  const itemImages = {};
+  function itemImage(kind) {
+    if (!itemImages[kind]) {
+      const img = new Image();
+      img.src = "assets/items/item_" + kind + ".png?v=4";
+      itemImages[kind] = img;
+    }
+    return itemImages[kind];
+  }
+  itemImage("life");
+  itemImage("rocket");
+  itemImage("spring");
 
   /** @type {Array<{id:number,x:number,y:number,w:number,h:number,vx:number,amp:number,baseX:number,phase:number,brittle:boolean,vanishAt:number|null,gone:boolean}>} */
   let platforms = [];
@@ -211,6 +235,33 @@
   let standingPlatform = null;
   /** Highest climb (smallest y) successfully landed — reject landings below this. */
   let climbY = Infinity;
+
+  // --- pickups: life / rocket / spring. Same rules for both characters. ---
+  const ITEM_MIN = { life: 12, rocket: 10, spring: 6 };
+  const ITEM_GAP = { life: 14, rocket: 16, spring: 8 };
+  const ITEM_CHANCE = { life: 0.12, rocket: 0.10, spring: 0.18 };
+  const ITEM_LABEL = { life: "生命", rocket: "火箭", spring: "弹力" };
+  const SPRING_MUL = 1.18;
+  const ROCKET_FLOORS = 10;
+  const ROCKET_DUR = 0.85;
+  const REVIVE_GRACE = 0.6;
+  const GHOST_LIFE = 1.4;
+  const PICKUP_BANNER = 0.8;
+
+  let extraLives = 0;
+  let springJumps = 0;
+  let fallGrace = 0;
+  let punchT = 0;
+  let rocketRide = null;
+  let pickupBanner = null;
+  let lastSafe = null;
+  let needRevive = false;
+  let itemFloors = new Set();
+  let lastItemFloor = { life: -9999, rocket: -9999, spring: -9999 };
+
+  const itemHud = document.getElementById("item-hud");
+  const hudLives = document.getElementById("hud-lives");
+  const hudSpring = document.getElementById("hud-spring");
 
   function platformWidthForScore(s) {
     if (s <= 5) return 120 + Math.random() * 20;
@@ -321,7 +372,11 @@
       x = prev.x + Math.sign(dx || 1) * safe;
       x = Math.max(half + 12, Math.min(W - half - 12, x));
     }
-    return makePlatform(x, prev.y - gap, w, scoreHint);
+    // Spring / rocket never widen this gap or the offset clamp above.
+    const p = makePlatform(x, prev.y - gap, w, scoreHint);
+    p.floor = (prev.floor || 0) + 1;
+    tryAttachItem(p);
+    return p;
   }
 
   function spawnNextRandom(prev) {
@@ -385,7 +440,391 @@
     if (rid === "stars" && Math.random() < 0.75) {
       stars.push({ x: p.x, y: p.y - 70, plat: p, got: false, t: Math.random() * 6 });
     }
+    tryAttachItem(p);
     return p;
+  }
+
+  function clearRunBuffs() {
+    extraLives = 0;
+    springJumps = 0;
+    fallGrace = 0;
+    rocketRide = null;
+    pickupBanner = null;
+    lastSafe = null;
+    needRevive = false;
+    itemFloors = new Set();
+    lastItemFloor = { life: -9999, rocket: -9999, spring: -9999 };
+    player.springJump = false;
+    punchT = 0;
+  }
+
+  function itemHudImg(kind, dim) {
+    return '<img src="assets/items/item_' + kind + '.png?v=4" width="16" height="16" alt=""' + (dim ? ' class="dim"' : "") + ">";
+  }
+
+  function syncItemHud() {
+    if (!itemHud) return;
+    const show = running && !gameOver;
+    itemHud.classList.toggle("hidden", !show);
+    if (!show || !hudLives || !hudSpring) return;
+    hudLives.innerHTML = itemHudImg("life", extraLives < 1) + itemHudImg("life", extraLives < 2);
+    hudLives.setAttribute("aria-label", "生命 " + extraLives);
+    hudSpring.innerHTML = itemHudImg("spring", springJumps <= 0) + "<b>" + springJumps + "</b>";
+    hudSpring.classList.toggle("off", springJumps <= 0);
+    hudSpring.setAttribute("aria-label", "弹力 " + springJumps);
+  }
+
+  function rememberSafe(plat) {
+    if (!plat) return;
+    lastSafe = {
+      id: plat.id,
+      x: plat.baseX,
+      y: plat.y,
+      w: plat.w,
+      floor: plat.floor || 0,
+    };
+  }
+
+  function lifeChance() {
+    if (mode === "classic" && score >= 15) return 0.18;
+    return ITEM_CHANCE.life;
+  }
+
+  /** Current level and the 10-floor flight path. Classic has no timed levels. */
+  function rocketPathTimed(floor) {
+    if (mode !== "random") return false;
+    const a = levelOf(floor);
+    const b = levelOf(floor + ROCKET_FLOORS);
+    for (let L = a; L <= b; L++) {
+      if (ruleId(L) === "timer") return true;
+    }
+    return false;
+  }
+
+  function itemEligible(kind, floor) {
+    if (floor < ITEM_MIN[kind]) return false;
+    if (floor - lastItemFloor[kind] < ITEM_GAP[kind]) return false;
+    if (kind === "life" && extraLives >= 2) return false;
+    if (kind === "rocket" && rocketPathTimed(floor)) return false;
+    return true;
+  }
+
+  function tryAttachItem(p) {
+    if (!p || p.ghost || p.item) return;
+    const floor = p.floor || 0;
+    if (floor <= 5) return;
+    if (itemFloors.has(floor - 1)) return;
+    const last = player.lastFloor || 0;
+    for (const q of platforms) {
+      if (q === p || q.gone || !q.item || q.item.got) continue;
+      const qf = q.floor || 0;
+      if (qf <= last) continue;
+      if (Math.abs(qf - floor) < 5) return;
+    }
+    const kinds = ["life", "rocket", "spring"];
+    for (let i = kinds.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = kinds[i];
+      kinds[i] = kinds[j];
+      kinds[j] = tmp;
+    }
+    for (const kind of kinds) {
+      if (!itemEligible(kind, floor)) continue;
+      const chance = kind === "life" ? lifeChance() : ITEM_CHANCE[kind];
+      if (Math.random() < chance) {
+        p.item = { kind: kind, got: false };
+        itemFloors.add(floor);
+        lastItemFloor[kind] = floor;
+        return;
+      }
+    }
+  }
+
+  function platformAtFloor(floor) {
+    for (const p of platforms) {
+      if (!p.gone && !p.ghost && (p.floor || 0) === floor) return p;
+    }
+    return null;
+  }
+
+  function highestFloorPlatform() {
+    let top = null;
+    for (const p of platforms) {
+      if (p.gone || p.ghost) continue;
+      if (!top || (p.floor || 0) > (top.floor || 0)) top = p;
+    }
+    return top;
+  }
+
+  function dropPlatformsAbove(floor) {
+    const drop = new Set();
+    const keep = [];
+    for (const p of platforms) {
+      if (!p.ghost && (p.floor || 0) > floor) drop.add(p);
+      else keep.push(p);
+    }
+    platforms = keep;
+    if (drop.size) stars = stars.filter((st) => !st.plat || !drop.has(st.plat));
+  }
+
+  function alignPlatformBase(p, launchX) {
+    const half = p.w / 2;
+    const amp = p.amp || 0;
+    const minB = half + amp + 8;
+    const maxB = W - half - amp - 8;
+    let base = launchX;
+    if (minB <= maxB) base = Math.max(minB, Math.min(maxB, base));
+    else base = W / 2;
+    const prevX = p.x;
+    p.baseX = base;
+    p.phase = 0;
+    p.x = base;
+    const dx = p.x - prevX;
+    if (dx !== 0) {
+      for (const st of stars) if (st.plat === p) st.x += dx;
+    }
+  }
+
+  function beginRocket(fromPlat) {
+    const startFloor = fromPlat.floor || 0;
+    const destFloor = startFloor + ROCKET_FLOORS;
+    let guard = 0;
+    while (!platformAtFloor(destFloor) && guard++ < 40) {
+      const top = highestFloorPlatform();
+      if (!top) return false;
+      platforms.push(spawnNext(top, score));
+    }
+    const dest = platformAtFloor(destFloor);
+    if (!dest) return false;
+    dropPlatformsAbove(destFloor);
+    alignPlatformBase(dest, player.x);
+    rocketRide = {
+      t: 0,
+      dur: ROCKET_DUR,
+      dest: dest,
+      startFloor: startFloor,
+      destFloor: destFloor,
+      y0: player.y,
+    };
+    player.onGround = false;
+    standingPlatform = null;
+    player.platOffset = 0;
+    player.vx = 0;
+    player.vy = 0;
+    player.slide = 0;
+    player.jumping = true;
+    player.springJump = false;
+    beep(740, 0.09, "square", 0.05);
+    return true;
+  }
+
+  function grantStar(st) {
+    if (!st || st.got) return;
+    st.got = true;
+    score += 2;
+    scoreEl.textContent = String(score);
+    beep(1040, 0.07, "sine", 0.05);
+    for (let i = 0; i < 10; i++) {
+      particles.push({
+        x: st.x,
+        y: st.y,
+        vx: (Math.random() - 0.5) * 220,
+        vy: (Math.random() - 0.5) * 220,
+        life: 0.4,
+        color: "#ffd84a",
+      });
+    }
+  }
+
+  function finishRocket() {
+    const ride = rocketRide;
+    if (!ride) return;
+    rocketRide = null;
+    const dest = ride.dest;
+    if (dest.blink) {
+      dest.blinkT = 0;
+      dest.solid = true;
+    }
+    player.x = dest.x;
+    player.y = dest.y - player.h / 2;
+    player.vx = 0;
+    player.vy = 0;
+    player.slide = 0;
+    player.onGround = true;
+    player.jumping = false;
+    player.springJump = false;
+    player.platOffset = 0;
+    standingPlatform = dest;
+    climbY = dest.y;
+    const prevUpcoming = levelOf(ride.startFloor + 1);
+    player.lastFloor = dest.floor || ride.destFloor;
+    score += ride.destFloor - ride.startFloor;
+    if (mode === "random") {
+      const nl = levelOf(player.lastFloor + 1);
+      if (nl !== prevUpcoming) {
+        score += 3;
+        showBanner(nl);
+      }
+    }
+    scoreEl.textContent = String(score);
+    rememberSafe(dest);
+    if (dest.ice) player.slide = (Math.random() < 0.5 ? -1 : 1) * (85 + Math.random() * 40);
+    if (dest.brittle && dest.vanishAt == null) {
+      dest.vanishAt = performance.now() + (dest.rule === "crumble" ? 1100 : 600);
+    }
+    player.landPulse = 1;
+    player.scaleY = 0.72;
+    beep(880, 0.1, "triangle", 0.06);
+    collectItem(dest);
+    syncItemHud();
+  }
+
+  function updateRocket(dt) {
+    const ride = rocketRide;
+    if (!ride) return;
+    ride.t += dt;
+    const u = Math.min(1, ride.t / ride.dur);
+    const eased = 1 - (1 - u) * (1 - u);
+    const dest = ride.dest;
+    const y1 = dest.y - player.h / 2;
+    player.x = dest.x;
+    player.y = ride.y0 + (y1 - ride.y0) * eased;
+    player.vx = 0;
+    player.vy = 0;
+    if (Math.random() < 0.7) {
+      particles.push({
+        x: player.x + (Math.random() - 0.5) * 8,
+        y: player.y + player.h * 0.4,
+        vx: (Math.random() - 0.5) * 30,
+        vy: 70 + Math.random() * 50,
+        life: 0.22,
+        color: Math.random() < 0.5 ? "#ffd84a" : "#ff7a3c",
+      });
+    }
+    if (mode === "random") {
+      for (const st of stars) {
+        st.t += dt;
+        if (st.got || !st.plat) continue;
+        const f = st.plat.floor || 0;
+        if (f <= ride.startFloor || f > ride.destFloor) continue;
+        if (Math.abs(st.x - player.x) <= PLAYER_W) grantStar(st);
+      }
+      if (banner) banner.t += dt;
+    }
+    if (u >= 1) finishRocket();
+  }
+
+  function showPickup(kind) {
+    pickupBanner = { kind: kind, t: 0 };
+    const freq = kind === "life" ? 680 : kind === "rocket" ? 760 : 520;
+    beep(freq, 0.09, "triangle", 0.055);
+    for (let i = 0; i < 8; i++) {
+      particles.push({
+        x: player.x,
+        y: player.y,
+        vx: (Math.random() - 0.5) * 180,
+        vy: -40 - Math.random() * 120,
+        life: 0.35,
+        color: kind === "life" ? "#ff4d6d" : kind === "rocket" ? "#ffb15a" : "#d6ff6a",
+      });
+    }
+  }
+
+  function collectItem(plat) {
+    if (rocketRide) return;
+    if (!plat || !plat.item || plat.item.got) return;
+    if (plat.blink && plat.solid === false) return;
+    const kind = plat.item.kind;
+    plat.item.got = true;
+    if (kind === "life") extraLives = Math.min(2, extraLives + 1);
+    else if (kind === "spring") springJumps = 3;
+    else if (kind === "rocket") {
+      const started = beginRocket(plat);
+      if (!started) {
+        plat.item.got = false;
+        return;
+      }
+    }
+    showPickup(kind);
+    syncItemHud();
+  }
+
+  function makeGhostPlatform(safe) {
+    const w = Math.max(safe.w || 80, 80);
+    const half = w / 2;
+    const x = Math.max(half + 8, Math.min(W - half - 8, safe.x));
+    const p = makePlatform(x, safe.y, w, 0);
+    p.x = x;
+    p.baseX = x;
+    p.vx = 0;
+    p.amp = 0;
+    p.brittle = false;
+    p.ice = false;
+    p.blink = false;
+    p.ghost = true;
+    p.item = null;
+    p.floor = safe.floor;
+    p.rule = null;
+    p.vanishAt = performance.now() + GHOST_LIFE * 1000;
+    return p;
+  }
+
+  function placeOnPlatform(plat) {
+    player.onGround = true;
+    player.vx = 0;
+    player.vy = 0;
+    player.slide = 0;
+    player.jumping = false;
+    player.springJump = false;
+    player.x = plat.x;
+    player.y = plat.y - player.h / 2;
+    player.platOffset = 0;
+    standingPlatform = plat;
+    climbY = plat.y;
+    rememberSafe(plat);
+  }
+
+  function revive() {
+    if (gameOver) return;
+    extraLives = Math.max(0, extraLives - 1);
+    springJumps = 0;
+    player.springJump = false;
+    rocketRide = null;
+    fallGrace = REVIVE_GRACE;
+    const safe = lastSafe || {
+      id: -1,
+      x: W / 2,
+      y: H - 100,
+      w: 160,
+      floor: player.lastFloor || 0,
+    };
+    let plat = null;
+    for (const p of platforms) {
+      if (p.id === safe.id && !p.gone) { plat = p; break; }
+    }
+    const hidden = plat && plat.blink && plat.solid === false;
+    if (!plat || hidden) {
+      plat = makeGhostPlatform(safe);
+      platforms.push(plat);
+    }
+    placeOnPlatform(plat);
+    cameraY = player.y - H * 0.58;
+    if (cameraY > 0) cameraY = 0;
+    syncItemHud();
+    beep(440, 0.1, "triangle", 0.06);
+  }
+
+  /** "revive" spends a life, "absorb" ignores the hazard, "die" is the caller's old fail path. */
+  function footingFate() {
+    if (rocketRide || fallGrace > 0) return "absorb";
+    if (extraLives > 0) return "revive";
+    return "die";
+  }
+
+  function updateCamera(dt) {
+    const targetCam = player.y - H * 0.58;
+    cameraY += (targetCam - cameraY) * Math.min(1, CAMERA_LERP * dt);
+    if (cameraY > 0) cameraY *= 0.9;
   }
 
   function ensurePlatforms() {
@@ -416,10 +855,16 @@
     cameraY = 0;
     climbY = Infinity;
     levelRules = [];
+    if (ruleSeed && ruleSeed.length) {
+      for (let i = 0; i < ruleSeed.length; i++) {
+        levelRules[i] = RULES.find(function (r) { return r.id === ruleSeed[i]; }) || WARMUP;
+      }
+    }
     windDirs = {};
     stars = [];
     banner = null;
     levelTimer = 0;
+    clearRunBuffs();
     player.lastFloor = 0;
     player.slide = 0;
     player.scaleY = 1;
@@ -430,6 +875,7 @@
     player.platOffset = 0;
     player.pose = 0;
     player.jumping = false;
+    player.springJump = false;
 
     const groundY = H - 100;
     const ground = makePlatform(W / 2, groundY, 160, 0);
@@ -443,6 +889,7 @@
     player.y = ground.y - player.h / 2;
     standingPlatform = ground;
     climbY = ground.y;
+    rememberSafe(ground);
 
     let last = ground;
     for (let i = 0; i < 6; i++) {
@@ -453,6 +900,7 @@
     overlay.classList.add("hidden");
     bestEl.textContent = String(mode === "random" ? bestRandom : best);
     if (mode === "random") showBanner(0);
+    syncItemHud();
     lastTs = performance.now();
   }
 
@@ -469,6 +917,8 @@
     running = false;
     player.onGround = false;
     standingPlatform = null;
+    clearRunBuffs();
+    syncItemHud();
     beep(110, 0.22, "sawtooth", 0.06);
 
     let isRecord = false;
@@ -501,23 +951,35 @@
   }
 
   function jump() {
-    if (!running || gameOver || !player.onGround) return;
+    if (!running || gameOver || !player.onGround || rocketRide) return;
     player.onGround = false;
     const rid = activeRuleId();
-    player.vy = physFor(rid).vy;
+    const ph = physFor(rid);
+    if (springJumps > 0) {
+      springJumps -= 1;
+      player.springJump = true;
+      player.vy = ph.vy * SPRING_MUL;
+      punchT = 0.0001;
+    } else {
+      player.springJump = false;
+      player.vy = ph.vy;
+    }
     player.vx = 0; // fixed arc — no horizontal aim (wind may push in random mode)
     player.slide = 0;
     standingPlatform = null;
     player.platOffset = 0;
     player.scaleY = 1.15;
     player.jumping = true;
+    syncItemHud();
     beep(520, 0.06, "square", 0.045);
   }
 
   function landOn(plat) {
     // Only land on a platform higher than last stand (smaller y). Else fall = game over.
     if (!(plat.y < climbY - 2)) {
-      triggerGameOver();
+      const fate = footingFate();
+      if (fate === "revive") revive();
+      else if (fate === "die") triggerGameOver();
       return;
     }
 
@@ -546,6 +1008,7 @@
     player.landPulse = 1;
     player.scaleY = 0.72;
     player.jumping = false;
+    player.springJump = false;
     beep(320, 0.05, "triangle", 0.05);
 
     for (let i = 0; i < 8; i++) {
@@ -562,6 +1025,8 @@
     if (plat.brittle && plat.vanishAt == null) {
       plat.vanishAt = performance.now() + (plat.rule === "crumble" ? 1100 : 600);
     }
+    rememberSafe(plat);
+    collectItem(plat);
     ensurePlatforms();
   }
 
@@ -576,17 +1041,25 @@
         p.blinkT = (p.blinkT + dt) % 1.8;
         p.solid = p.blinkT < 1.15;
         if (!p.solid && standingPlatform && standingPlatform.id === p.id) {
-          player.onGround = false;
-          standingPlatform = null;
-          player.platOffset = 0;
+          const fate = footingFate();
+          if (fate === "revive") needRevive = true;
+          else {
+            player.onGround = false;
+            standingPlatform = null;
+            player.platOffset = 0;
+          }
         }
       }
       if (p.vanishAt != null && now >= p.vanishAt) {
         p.gone = true;
         if (standingPlatform && standingPlatform.id === p.id) {
-          player.onGround = false;
-          standingPlatform = null;
-          player.platOffset = 0;
+          const fate = footingFate();
+          if (fate === "revive") needRevive = true;
+          else {
+            player.onGround = false;
+            standingPlatform = null;
+            player.platOffset = 0;
+          }
         }
         for (let i = 0; i < 6; i++) {
           particles.push({
@@ -600,10 +1073,34 @@
         }
       }
     }
+    if (needRevive) {
+      needRevive = false;
+      revive();
+    }
     platforms = platforms.filter((p) => !p.gone);
   }
 
+  function updateJuice(dt) {
+    if (punchT > 0) {
+      punchT += dt;
+      if (punchT > 0.24) punchT = 0;
+    }
+  }
+
   function updatePlayer(dt) {
+    updateJuice(dt);
+    if (pickupBanner) {
+      pickupBanner.t += dt;
+      if (pickupBanner.t >= PICKUP_BANNER) pickupBanner = null;
+    }
+    if (fallGrace > 0) fallGrace = Math.max(0, fallGrace - dt);
+    if (rocketRide) {
+      updateRocket(dt);
+      updateCamera(dt);
+      player.pose += (1 - player.pose) * Math.min(1, dt * 22);
+      player.scaleY += (1 - player.scaleY) * Math.min(1, dt * 12);
+      return;
+    }
     if (player.landPulse > 0) {
       player.landPulse = Math.max(0, player.landPulse - dt * 4);
     }
@@ -621,10 +1118,16 @@
         if (Math.abs(player.slide) < 4) player.slide = 0;
         if (Math.abs(player.platOffset) > standingPlatform.w / 2 + 2) {
           // slid off the edge
-          player.onGround = false;
-          standingPlatform = null;
-          player.vx = player.slide * 0.5;
+          const fate = footingFate();
+          const slideVx = player.slide * 0.5;
           player.slide = 0;
+          if (fate === "revive") {
+            revive();
+          } else {
+            player.onGround = false;
+            standingPlatform = null;
+            player.vx = slideVx;
+          }
         }
       }
     }
@@ -639,7 +1142,12 @@
       player.vx = 0;
     } else {
       const rid = activeRuleId();
-      player.vy += physFor(rid).g * dt;
+      const ph = physFor(rid);
+      let g = ph.g;
+      // Low-g spring: level phys first, then the 1.18 takeoff. Gravity stays,
+      // but never drops below half of normal gravity.
+      if (player.springJump && rid === "lowg") g = Math.max(g, GRAVITY * 0.5);
+      player.vy += g * dt;
       // no player steering; wind (random mode) is the only push
       const wind = rid === "wind" ? windFor(levelOf((player.lastFloor || 0) + 1)) : 0;
       player.x += (player.vx + wind) * dt;
@@ -651,6 +1159,8 @@
         const prevFoot = footY - player.vy * dt;
         for (const p of platforms) {
           if (p.gone || (p.blink && !p.solid)) continue;
+          // A higher arc still only sticks to the next floor — never skip one.
+          if (player.springJump && (p.floor || 0) !== (player.lastFloor || 0) + 1) continue;
           const top = p.y;
           const left = p.x - p.w / 2;
           const right = p.x + p.w / 2;
@@ -667,22 +1177,25 @@
       }
     }
 
-    const targetCam = player.y - H * 0.58;
-    cameraY += (targetCam - cameraY) * Math.min(1, CAMERA_LERP * dt);
-    if (cameraY > 0) cameraY *= 0.9;
+    if (gameOver) return;
+    if (rocketRide) {
+      updateCamera(dt);
+      return;
+    }
+
+    updateCamera(dt);
 
     if (player.y - cameraY > H + 40) {
-      triggerGameOver();
+      const fate = footingFate();
+      if (fate === "revive") revive();
+      else if (fate === "die") triggerGameOver();
     }
+    if (gameOver) return;
     if (mode === "random") {
       for (const st of stars) {
         st.t += dt;
         if (!st.got && Math.abs(st.x - player.x) < 26 && Math.abs(st.y - player.y) < 30) {
-          st.got = true;
-          score += 2;
-          scoreEl.textContent = String(score);
-          beep(1040, 0.07, "sine", 0.05);
-          for (let i = 0; i < 10; i++) particles.push({ x: st.x, y: st.y, vx: (Math.random() - 0.5) * 220, vy: (Math.random() - 0.5) * 220, life: 0.4, color: "#ffd84a" });
+          grantStar(st);
         }
       }
       if (banner) banner.t += dt;
@@ -739,6 +1252,22 @@
     const x = s.x - p.w / 2;
     const y = s.y;
     if (y < -40 || y > H + 40) return;
+    if (p.ghost) {
+      const life = p.vanishAt ? Math.max(0, (p.vanishAt - performance.now()) / (GHOST_LIFE * 1000)) : 1;
+      ctx.save();
+      ctx.globalAlpha = 0.35 + 0.45 * life;
+      ctx.fillStyle = "#d7e6ff";
+      roundRect(ctx, x, y, p.w, p.h, 6);
+      ctx.fill();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      roundRect(ctx, x, y, p.w, p.h, 6);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+      return;
+    }
     if (p.blink) {
       const warn = p.solid && p.blinkT > 0.85;
       ctx.globalAlpha = p.solid ? (warn ? 0.45 + 0.4 * Math.abs(Math.sin(p.blinkT * 30)) : 1) : 0.14;
@@ -810,51 +1339,61 @@
     }
   }
 
-  function drawPlayer() {
-    const s = worldToScreen(player.x, player.y);
-    const footY = s.y + player.h / 2;
-    const spread = 1 - Math.max(0, Math.min(1, player.pose));
+  function frameReady(img) {
+    return !!(img && img.complete && img.naturalWidth > 0);
+  }
 
-    if (player.onGround) {
-      ctx.fillStyle = "rgba(0,0,0,0.28)";
-      ctx.beginPath();
-      ctx.ellipse(s.x, footY + 3, 12 + spread * 22, 4.2, 0, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    const ch = activeChar();
-    const poseSheet = sheetFor(ch.id);
-    const ready = poseSheet.complete && poseSheet.naturalWidth > 0;
-    if (!ready) {
+  /** Draw a sprite so its pivot sits on the hit-box sole. Scale is shared. */
+  function drawAnchored(img, pivotX, pivotY, srcSize, footX, footY) {
+    if (!frameReady(img)) {
       const hw = player.w / 2;
-      const hh = (player.h / 2) * player.scaleY;
-      const top = s.y - hh;
       ctx.fillStyle = "#e8f0ff";
-      roundRect(ctx, s.x - hw, top, player.w, hh * 2, 8);
+      roundRect(ctx, footX - hw, footY - player.h, player.w, player.h, 8);
       ctx.fill();
       ctx.fillStyle = "#4aa3e8";
-      roundRect(ctx, s.x - hw + 4, top + 6, player.w - 8, 8, 4);
+      roundRect(ctx, footX - hw + 4, footY - player.h + 6, player.w - 8, 8, 4);
       ctx.fill();
       return;
     }
-
-    const pose = Math.max(0, Math.min(1, player.pose));
-    // Smoothstep rushes the imperfect middle frames and settles on the two photos.
-    const eased = pose * pose * (3 - 2 * pose);
-    const frame = Math.round(eased * (POSE_N - 1));
-    // Squash/stretch around the feet. Width eases the other way so the volume holds.
-    const sy = 0.5 * VISUAL * player.scaleY;
-    const sx = (0.5 * VISUAL) / Math.pow(Math.max(0.55, player.scaleY), 0.35);
     ctx.save();
     ctx.imageSmoothingEnabled = true;
-    ctx.translate(s.x, footY);
-    ctx.scale(sx, sy);
-    ctx.drawImage(
-      poseSheet,
-      frame * ch.fw, 0, ch.fw, ch.fh,
-      -ch.fw / 2, -(ch.fh - ch.foot), ch.fw, ch.fh
-    );
+    ctx.translate(footX, footY);
+    ctx.scale(SPRITE_SCALE, SPRITE_SCALE);
+    ctx.drawImage(img, -pivotX, -pivotY, srcSize, srcSize);
     ctx.restore();
+  }
+
+  function punchOffset() {
+    if (punchT <= 0) return 0;
+    const u = Math.min(1, punchT / 0.24);
+    return Math.sin(u * Math.PI) * -8;
+  }
+
+  function drawPlayer() {
+    const s = worldToScreen(player.x, player.y);
+    const footY = s.y + player.h / 2;
+    const ch = activeChar();
+    const riding = !!rocketRide;
+    const springAir = player.springJump && !player.onGround;
+
+    if (player.onGround && !riding) {
+      ctx.fillStyle = "rgba(0,0,0,0.28)";
+      ctx.beginPath();
+      ctx.ellipse(s.x, footY + 2, 10, 3.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (riding) {
+      drawAnchored(ch.rocket, ch.rocketPivotX, ch.rocketPivotY, 1024, s.x, footY);
+    } else if (springAir) {
+      drawAnchored(ch.spring, ch.springPivotX, ch.springPivotY, 1024, s.x, footY);
+    } else {
+      drawAnchored(airborneFrame(ch), 256, 481, 512, s.x, footY);
+    }
+  }
+
+  function airborneFrame(ch) {
+    return (!player.onGround || rocketRide) ? ch.jump : ch.land;
   }
 
   function drawParticles() {
@@ -865,6 +1404,117 @@
       ctx.fillRect(s.x - 2, s.y - 2, 4, 4);
       ctx.globalAlpha = 1;
     }
+  }
+
+  function drawHeartIcon(cx, cy, s, filled) {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy + s * 0.85);
+    ctx.bezierCurveTo(cx - s * 1.15, cy + s * 0.15, cx - s * 0.9, cy - s * 0.9, cx, cy - s * 0.28);
+    ctx.bezierCurveTo(cx + s * 0.9, cy - s * 0.9, cx + s * 1.15, cy + s * 0.15, cx, cy + s * 0.85);
+    ctx.closePath();
+    ctx.fillStyle = filled ? "#ff4d6d" : "rgba(255,255,255,0.08)";
+    ctx.strokeStyle = filled ? "#ffd0da" : "rgba(255,180,196,0.9)";
+    ctx.lineWidth = 1.6;
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  function drawRocketIcon(cx, cy, s) {
+    ctx.fillStyle = "#ffd24a";
+    ctx.beginPath();
+    ctx.moveTo(cx - s * 0.26, cy + s * 0.32);
+    ctx.lineTo(cx, cy + s * 1.05);
+    ctx.lineTo(cx + s * 0.26, cy + s * 0.32);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#ff7a3c";
+    ctx.beginPath();
+    ctx.moveTo(cx - s * 0.28, cy + s * 0.02);
+    ctx.lineTo(cx - s * 0.86, cy + s * 0.7);
+    ctx.lineTo(cx - s * 0.28, cy + s * 0.42);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx + s * 0.28, cy + s * 0.02);
+    ctx.lineTo(cx + s * 0.86, cy + s * 0.7);
+    ctx.lineTo(cx + s * 0.28, cy + s * 0.42);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#f4f7ff";
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - s * 1.05);
+    ctx.lineTo(cx + s * 0.38, cy - s * 0.15);
+    ctx.lineTo(cx + s * 0.38, cy + s * 0.48);
+    ctx.lineTo(cx - s * 0.38, cy + s * 0.48);
+    ctx.lineTo(cx - s * 0.38, cy - s * 0.15);
+    ctx.closePath();
+    ctx.fill();
+    ctx.lineWidth = 1.3;
+    ctx.strokeStyle = "#9fb4d6";
+    ctx.stroke();
+    ctx.fillStyle = "#3aa0ff";
+    ctx.beginPath();
+    ctx.arc(cx, cy - s * 0.02, Math.max(1.2, s * 0.16), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawSpringIcon(cx, cy, s) {
+    ctx.lineWidth = 1.7;
+    ctx.strokeStyle = "#e9ff9a";
+    ctx.fillStyle = "rgba(190, 255, 70, 0.2)";
+    const n = 4;
+    for (let i = 0; i < n; i++) {
+      const yy = cy - s * 0.95 + i * ((s * 1.9) / (n - 1));
+      ctx.beginPath();
+      ctx.ellipse(cx, yy, s * 0.72, s * 0.26, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  function drawItemIcon(kind, cx, cy, size) {
+    const img = itemImage(kind);
+    const d = size || ITEM_DRAW;
+    if (frameReady(img)) {
+      ctx.drawImage(img, cx - d / 2, cy - d / 2, d, d);
+      return;
+    }
+    if (kind === "life") drawHeartIcon(cx, cy, d * 0.42, true);
+    else if (kind === "rocket") drawRocketIcon(cx, cy, d * 0.42);
+    else drawSpringIcon(cx, cy, d * 0.42);
+  }
+
+  function drawItem(p) {
+    if (!p.item || p.item.got || p.gone || p.ghost) return;
+    const s = worldToScreen(p.x, p.y - 28);
+    if (s.y < -30 || s.y > H + 30) return;
+    ctx.save();
+    if (p.blink && p.solid === false) ctx.globalAlpha = 0.22;
+    drawItemIcon(p.item.kind, s.x, s.y, ITEM_DRAW);
+    ctx.restore();
+  }
+
+  function drawPickupBanner() {
+    if (!pickupBanner || !running) return;
+    const t = pickupBanner.t;
+    const a = t < 0.1 ? t / 0.1 : t > 0.62 ? Math.max(0, (PICKUP_BANNER - t) / 0.18) : 1;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.translate(W / 2, H * 0.46);
+    ctx.fillStyle = "rgba(8,14,28,0.9)";
+    roundRect(ctx, -84, -20, 168, 40, 20);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.lineWidth = 1.5;
+    roundRect(ctx, -84, -20, 168, 40, 20);
+    ctx.stroke();
+    drawItemIcon(pickupBanner.kind, -50, 0, 9);
+    ctx.fillStyle = "#f4f7ff";
+    ctx.font = "bold 16px system-ui,sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(ITEM_LABEL[pickupBanner.kind] || "", -32, 1);
+    ctx.restore();
   }
 
   function drawStars() {
@@ -960,14 +1610,18 @@
     const oy = (ch - H * scale) / 2;
     ctx.setTransform(scale, 0, 0, scale, ox, oy);
     ctx.clearRect(-ox / scale, -oy / scale, cw / scale, ch / scale);
+    const punch = punchOffset();
+    if (punch) ctx.setTransform(scale, 0, 0, scale, ox, oy + punch * scale);
 
     drawBackground();
     drawWind();
     for (const p of platforms) drawPlatform(p);
+    for (const p of platforms) drawItem(p);
     drawStars();
     drawParticles();
     drawPlayer();
     drawHint();
+    drawPickupBanner();
     drawRuleHud();
   }
 
@@ -1086,6 +1740,7 @@
     standingPlatform = ground;
     climbY = ground.y;
     cameraY = 0;
+    syncItemHud();
   }
   function selectCharacter(id) {
     if (!CHARS[id]) return;
@@ -1145,10 +1800,118 @@
         playerY: player.y,
         climbY,
         playerVx: player.vx,
+        playerVy: player.vy,
+        playerW: player.w,
+        playerH: player.h,
         character: characterId,
         pose: player.pose,
         jumping: player.jumping,
+        springJump: player.springJump,
+        extraLives: extraLives,
+        springJumps: springJumps,
+        fallGrace: fallGrace,
+        rocket: !!rocketRide,
+        artReady: frameReady(CHARS.guagua.land) && frameReady(CHARS.guagua.jump) && frameReady(CHARS.guagua.rocket) && frameReady(CHARS.guagua.spring) && frameReady(CHARS.zhizhi.land) && frameReady(CHARS.zhizhi.jump) && frameReady(CHARS.zhizhi.rocket) && frameReady(CHARS.zhizhi.spring) && frameReady(itemImage("life")) && frameReady(itemImage("rocket")) && frameReady(itemImage("spring")),
+        lastFloor: player.lastFloor || 0,
+        items: platforms.filter(function (p) { return p.item && !p.item.got; }).map(function (p) {
+          return { floor: p.floor || 0, kind: p.item.kind, y: p.y };
+        }),
       };
+    },
+    debug: {
+      step: function (dt) {
+        const now = performance.now();
+        if (running && !gameOver) {
+          updatePlatforms(dt, now);
+          updatePlayer(dt);
+          updateParticles(dt);
+          ensurePlatforms();
+        } else {
+          updateParticles(dt);
+        }
+        render();
+      },
+      setLives: function (n) {
+        extraLives = Math.max(0, Math.min(2, n));
+        syncItemHud();
+      },
+      setSpring: function (n) {
+        springJumps = Math.max(0, n);
+        syncItemHud();
+      },
+      setScore: function (n) {
+        score = Math.max(0, n);
+        scoreEl.textContent = String(score);
+      },
+      lifeChance: lifeChance,
+      rocketBanned: rocketPathTimed,
+      seedRules: function (ids) {
+        ruleSeed = ids ? ids.slice() : null;
+      },
+      forceItem: function (kind) {
+        if (!standingPlatform) return false;
+        standingPlatform.item = { kind: kind, got: false };
+        return true;
+      },
+      collectStanding: function () {
+        if (!standingPlatform) return false;
+        collectItem(standingPlatform);
+        return true;
+      },
+      spawnOne: function () {
+        const top = highestFloorPlatform();
+        const next = spawnNext(top, score);
+        platforms.push(next);
+        return next.floor;
+      },
+      destroyStanding: function () {
+        if (!standingPlatform) return null;
+        standingPlatform.gone = true;
+        const fate = footingFate();
+        if (fate === "revive") revive();
+        else if (fate !== "absorb") {
+          player.onGround = false;
+          standingPlatform = null;
+          player.platOffset = 0;
+        }
+        platforms = platforms.filter(function (p) { return !p.gone; });
+        return standingPlatform;
+      },
+      nudgeOntoNext: function () {
+        const next = platformAtFloor((player.lastFloor || 0) + 1);
+        if (!next || !standingPlatform) return null;
+        const reach = standingPlatform.w / 2 - player.w / 2;
+        let offset = next.x - standingPlatform.x;
+        if (offset > reach) offset = reach;
+        if (offset < -reach) offset = -reach;
+        player.platOffset = offset;
+        player.x = standingPlatform.x + offset;
+        return { floor: next.floor, nextX: next.x, playerX: player.x, nextY: next.y, nextW: next.w };
+      },
+      freezePlatforms: function () {
+        for (const p of platforms) {
+          p.amp = 0;
+          p.vx = 0;
+          p.x = p.baseX;
+        }
+      },
+      yeet: function () {
+        player.onGround = false;
+        standingPlatform = null;
+        player.platOffset = 0;
+        player.y = cameraY + H + 80;
+        player.vy = 200;
+      },
+      slideOff: function () {
+        if (!standingPlatform) return false;
+        player.slide = 400;
+        player.platOffset = standingPlatform.w / 2 + 8;
+        return true;
+      },
+      setPadWidth: function (w) {
+        if (standingPlatform) standingPlatform.w = w;
+        if (lastSafe) lastSafe.w = w;
+      },
     },
   };
 })();
