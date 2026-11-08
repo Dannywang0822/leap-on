@@ -11,8 +11,10 @@
 
   const GRAVITY = 2200;
   const JUMP_VY = -920; // apex ≈ 192px
-  const PLAYER_W = 28;
-  const PLAYER_H = 36;
+  /** Cartoon body and hit box grow together. 28×36 → 35×45. */
+  const PLAYER_SCALE = 1.25;
+  const PLAYER_W = 28 * PLAYER_SCALE;
+  const PLAYER_H = 36 * PLAYER_SCALE;
   const PLATFORM_H = 16;
   const CAMERA_LERP = 8;
   /** Keep a few px of foot on the pad when clamping spawn offset. */
@@ -159,18 +161,34 @@
     springJump: false,
   };
 
-  // One pixel density for every pose. 512 canvases draw at ~74px, 1024 at ~147px.
-  // Pivot is the sole center, placed on the bottom-center of the 28×36 hit box.
-  const SPRITE_SCALE = (36 / 451) * 1.8;
+  // One pixel density for every pose. 512 canvases draw at ~92px, 1024 at ~184px.
+  // Pivot is the sole center, on the bottom-center of the 35×45 hit box, so the
+  // body grows up and out from the feet and does not sink into the pad.
+  const SPRITE_SCALE = (36 / 451) * 1.8 * PLAYER_SCALE;
+  // Opaque extents from the sole pivot, in source pixels. Land is the widest
+  // body (arms and feet); jump hands are the highest normal pose. Crown covers
+  // the tallest drawn pose so a spring hop cannot leave the top of the view.
+  const LAND_HALF_SRC = 213;
+  const JUMP_HALF_SRC = 135;
+  const JUMP_TOP_SRC = 451;
+  const CROWN_SRC = 478;
+  const SCREEN_PAD = 4;
+  const LAND_HALF = LAND_HALF_SRC * SPRITE_SCALE;
+  const JUMP_HALF = JUMP_HALF_SRC * SPRITE_SCALE;
+  const JUMP_TOP = JUMP_TOP_SRC * SPRITE_SCALE;
+  const CROWN = CROWN_SRC * SPRITE_SCALE;
+  // A pad's edge must leave the land pose on screen when the body stands on
+  // the inner lip: edge + playerW/2 − landHalf >= SCREEN_PAD.
+  const EDGE_INSET = Math.ceil(LAND_HALF + SCREEN_PAD - PLAYER_W / 2);
   const CHAR_KEY = "leap-on-character";
   const CHARS = {
     guagua: {
       id: "guagua",
       name: "小瓜瓜",
-      jumpSrc: "assets/guagua_jump.png?v=6",
-      landSrc: "assets/guagua_land.png?v=6",
-      rocketSrc: "assets/guagua_rocket_ride.png?v=6",
-      springSrc: "assets/guagua_spring_burst.png?v=6",
+      jumpSrc: "assets/guagua_jump.png?v=7",
+      landSrc: "assets/guagua_land.png?v=7",
+      rocketSrc: "assets/guagua_rocket_ride.png?v=7",
+      springSrc: "assets/guagua_spring_burst.png?v=7",
       rocketPivotX: 479,
       rocketPivotY: 708,
       springPivotX: 511,
@@ -179,10 +197,10 @@
     zhizhi: {
       id: "zhizhi",
       name: "小之之",
-      jumpSrc: "assets/zhizhi_jump.png?v=6",
-      landSrc: "assets/zhizhi_land.png?v=6",
-      rocketSrc: "assets/zhizhi_rocket_ride.png?v=6",
-      springSrc: "assets/zhizhi_spring_burst.png?v=6",
+      jumpSrc: "assets/zhizhi_jump.png?v=7",
+      landSrc: "assets/zhizhi_land.png?v=7",
+      rocketSrc: "assets/zhizhi_rocket_ride.png?v=7",
+      springSrc: "assets/zhizhi_spring_burst.png?v=7",
       rocketPivotX: 562,
       rocketPivotY: 682,
       springPivotX: 514,
@@ -215,7 +233,7 @@
   function itemImage(kind) {
     if (!itemImages[kind]) {
       const img = new Image();
-      img.src = "assets/items/item_" + kind + ".png?v=6";
+      img.src = "assets/items/item_" + kind + ".png?v=7";
       itemImages[kind] = img;
     }
     return itemImages[kind];
@@ -332,11 +350,12 @@
     let amp = speed > 0 ? moveAmpForScore(scoreHint) : 0;
     let baseX = x;
     const half = w / 2;
-    // Keep the whole oscillation inside the screen
-    const minBase = half + amp + 8;
-    const maxBase = W - half - amp - 8;
+    // Keep the whole oscillation inside the screen, far enough that the
+    // land pose is not cropped when the body stands on the inner lip.
+    const minBase = half + amp + EDGE_INSET;
+    const maxBase = W - half - amp - EDGE_INSET;
     if (minBase > maxBase) {
-      amp = Math.max(0, (W - w - 16) / 2);
+      amp = Math.max(0, (W - w - 2 * EDGE_INSET) / 2);
       baseX = W / 2;
     } else {
       baseX = Math.max(minBase, Math.min(maxBase, baseX));
@@ -368,11 +387,11 @@
     let x = prev.x + offset;
     // Re-clamp after screen edges so fairness still holds vs prev.x
     const half = w / 2;
-    x = Math.max(half + 12, Math.min(W - half - 12, x));
+    x = Math.max(half + EDGE_INSET, Math.min(W - half - EDGE_INSET, x));
     const dx = x - prev.x;
     if (Math.abs(dx) > safe) {
       x = prev.x + Math.sign(dx || 1) * safe;
-      x = Math.max(half + 12, Math.min(W - half - 12, x));
+      x = Math.max(half + EDGE_INSET, Math.min(W - half - EDGE_INSET, x));
     }
     // Spring / rocket never widen this gap or the offset clamp above.
     const p = makePlatform(x, prev.y - gap, w, scoreHint);
@@ -398,7 +417,7 @@
     let drift = 0;
     if (rid === "wind") drift = windFor(level) * airTime(gap, physFor(rid));
     const half = w / 2;
-    const lo = half + 12, hi = W - half - 12;
+    const lo = half + EDGE_INSET, hi = W - half - EDGE_INSET;
     let x = prev.x + drift + (Math.random() * 2 - 1) * budget;
     x = Math.max(lo, Math.min(hi, x));
     // fairness: target must stay within safe of (prev.x + drift)
@@ -428,8 +447,8 @@
     speed = Math.min(240, Math.max(speed, amp * rate));
     const p = makePlatform(x, prev.y - gap, w, 0);
     if (speed > 0) {
-      const minB = half + amp + 8, maxB = W - half - amp - 8;
-      if (minB > maxB) amp = Math.max(0, (W - w - 16) / 2);
+      const minB = half + amp + EDGE_INSET, maxB = W - half - amp - EDGE_INSET;
+      if (minB > maxB) amp = Math.max(0, (W - w - 2 * EDGE_INSET) / 2);
       p.baseX = Math.max(Math.min(minB, maxB), Math.min(Math.max(minB, maxB), x));
       if (minB > maxB) p.baseX = W / 2;
       p.x = p.baseX; p.vx = speed * (Math.random() < 0.5 ? -1 : 1); p.amp = amp;
@@ -462,7 +481,7 @@
   }
 
   function itemHudImg(kind, dim) {
-    return '<img src="assets/items/item_' + kind + '.png?v=6" width="20" height="20" alt=""' + (dim ? ' class="dim"' : "") + ">";
+    return '<img src="assets/items/item_' + kind + '.png?v=7" width="20" height="20" alt=""' + (dim ? ' class="dim"' : "") + ">";
   }
 
   function syncItemHud() {
@@ -573,8 +592,8 @@
   function alignPlatformBase(p, launchX) {
     const half = p.w / 2;
     const amp = p.amp || 0;
-    const minB = half + amp + 8;
-    const maxB = W - half - amp - 8;
+    const minB = half + amp + EDGE_INSET;
+    const maxB = W - half - amp - EDGE_INSET;
     let base = launchX;
     if (minB <= maxB) base = Math.max(minB, Math.min(maxB, base));
     else base = W / 2;
@@ -756,7 +775,7 @@
   function makeGhostPlatform(safe) {
     const w = Math.max(safe.w || 80, 80);
     const half = w / 2;
-    const x = Math.max(half + 8, Math.min(W - half - 8, safe.x));
+    const x = Math.max(half + EDGE_INSET, Math.min(W - half - EDGE_INSET, safe.x));
     const p = makePlatform(x, safe.y, w, 0);
     p.x = x;
     p.baseX = x;
@@ -829,6 +848,16 @@
     const targetCam = player.y - H * 0.58;
     cameraY += (targetCam - cameraY) * Math.min(1, CAMERA_LERP * dt);
     if (cameraY > 0) cameraY *= 0.9;
+    // screenY = worldY - cameraY. Keep the tallest crown inside the view.
+    const crown = player.y + player.h / 2 - CROWN;
+    const maxCam = crown - SCREEN_PAD;
+    if (cameraY > maxCam) cameraY = maxCam;
+  }
+
+  /** Airborne body stays fully on screen. Land pose is wider but only stands on a pad. */
+  function clampAirX(x) {
+    const limit = Math.max(player.w / 2, JUMP_HALF + SCREEN_PAD);
+    return Math.max(limit, Math.min(W - limit, x));
   }
 
   function ensurePlatforms() {
@@ -1159,7 +1188,7 @@
       // no player steering; wind (random mode) is the only push
       const wind = rid === "wind" ? windFor(levelOf((player.lastFloor || 0) + 1)) : 0;
       player.x += (player.vx + wind) * dt;
-      player.x = Math.max(player.w / 2, Math.min(W - player.w / 2, player.x));
+      player.x = clampAirX(player.x);
       player.y += player.vy * dt;
 
       if (player.vy > 0) {
@@ -1387,7 +1416,7 @@
     if (player.onGround && !riding) {
       ctx.fillStyle = "rgba(0,0,0,0.28)";
       ctx.beginPath();
-      ctx.ellipse(s.x, footY + 2, 10, 3.2, 0, 0, Math.PI * 2);
+      ctx.ellipse(s.x, footY + 2, 10 * PLAYER_SCALE, 3.2 * PLAYER_SCALE, 0, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -1814,7 +1843,17 @@
     H,
     BEST_KEY,
     PLAYER_W,
+    PLAYER_H,
+    PLAYER_SCALE,
+    SPRITE_SCALE,
+    EDGE_INSET,
+    SCREEN_PAD,
+    LAND_HALF,
+    JUMP_HALF,
+    JUMP_TOP,
+    CROWN,
     SPAWN_MARGIN,
+    clampAirX,
     maxSafeHorizOffset,
     jump,
     resetGame,
@@ -1845,6 +1884,7 @@
         playerVy: player.vy,
         playerW: player.w,
         playerH: player.h,
+        cameraY,
         character: characterId,
         pose: player.pose,
         jumping: player.jumping,
@@ -1954,6 +1994,17 @@
       setPadWidth: function (w) {
         if (standingPlatform) standingPlatform.w = w;
         if (lastSafe) lastSafe.w = w;
+      },
+      setAirborne: function (x, y, vy) {
+        player.onGround = false;
+        standingPlatform = null;
+        player.jumping = true;
+        player.springJump = false;
+        player.vx = 0;
+        player.platOffset = 0;
+        player.x = x;
+        if (y != null) player.y = y;
+        player.vy = vy || 0;
       },
     },
   };
